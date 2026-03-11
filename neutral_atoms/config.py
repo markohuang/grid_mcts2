@@ -1,56 +1,98 @@
-import collections
-from dataclasses import dataclass, field
-from typing import Callable, Optional
-
-KnownBounds = collections.namedtuple('KnownBounds', ['min', 'max'])
+import ml_collections
 
 
-@dataclass
-class MCTSConfig:
-    num_simulations: int = 50
-    discount: float = 1.0
-    pb_c_base: int = 19652
-    pb_c_init: float = 1.25
-    root_dirichlet_alpha: float = 0.03
-    root_exploration_fraction: float = 0.25
-    known_bounds: KnownBounds = field(default_factory=lambda: KnownBounds(-6.0, 6.0))
-    max_moves: float = float('inf')
-    visit_softmax_temperature_fn: Optional[Callable] = None
-
-    def __post_init__(self):
-        if self.visit_softmax_temperature_fn is None:
-            self.visit_softmax_temperature_fn = lambda steps: (
-                2.0 if steps < 500e3 else 0.5 if steps < 750e3 else 0.25
-            )
-
-
-@dataclass
-class TrainingConfig:
-    epochs: int = 50
-    num_selfplay: int = 20
-    buffer_size: int = 1000
-    td_steps: int = 5
-    batch_size: int = 128
-    lr: float = 2e-4
-    training_steps: int = 200
-    grad_norm_clip: float = 1.0
-    log_interval: int = 200
-    save_dir: str = './checkpoints/'
-    accelerator: str = 'cpu'
-    devices: int = 1
-    seed: int = 12315
+MAPS = [
+    {   # 2x6 with 9 atoms
+        'board_dim': (2, 6), 'num_qubits': 9,
+        'atom_map': [11, 3, 1, 8, 10, 7, 5, 6, 4],
+        'tasks': [
+            [[0, 8], [6, 2], [1, 7], [3, 5]],
+            [[0, 2], [6, 8], [1, 5], [3, 7]],
+            [[3, 7], [1, 5], [6, 8]],
+        ],
+    },
+    {   # 4x4 with 8 atoms
+        'board_dim': (4, 4), 'num_qubits': 8,
+        'atom_map': [5, 9, 10, 11, 2, 6, 0, 14],
+        'tasks': [
+            [[0, 1], [2, 3], [5, 4], [6, 7]],
+            [[0, 1], [2, 3], [5, 4], [6, 7]],
+            [[0, 1], [2, 3], [5, 4], [6, 7]],
+        ],
+    },
+    {   # 5x5 with 12 atoms
+        'board_dim': (5, 5), 'num_qubits': 12,
+        'atom_map': [4, 12, 7, 11, 15, 5, 2, 21, 22, 23, 20, 8],
+        'tasks': [
+            [[4, 3], [6, 7], [9, 8], [10, 11]],
+            [[2, 1], [4, 5], [7, 6], [8, 9]],
+            [[0, 1], [2, 3], [6, 5], [9, 8]],
+        ],
+    },
+]
 
 
-@dataclass
-class NetworkConfig:
-    num_tasks: int = 3
-    num_qubits: int = 9
-    board_size: int = 12
-    num_actions: int = 109
-    v_hsize: int = 64
-    p_hsize: int = 32
-    mlp_depth: int = 2
-    ema_decay: float = 0.995
-    num_bins: int = 51
-    value_min: float = -25.0
-    value_max: float = 25.0
+def atom_map_to_positions(atom_map, board_width):
+    return [(idx // board_width, idx % board_width) for idx in atom_map]
+
+
+def get_config():
+    c = ml_collections.ConfigDict()
+    c.map_num = 0
+    c.use_fake = False
+
+    c.env = ml_collections.ConfigDict()
+    c.env.budget = 24
+    c.env.entropy_weight = 0.0
+    c.env.reward_scale = 1.0
+
+    c.mcts = ml_collections.ConfigDict()
+    c.mcts.num_simulations = 50
+    c.mcts.discount = 1.0
+    c.mcts.pb_c_base = 19652
+    c.mcts.pb_c_init = 1.25
+    c.mcts.root_dirichlet_alpha = 0.03
+    c.mcts.root_exploration_fraction = 0.25
+    c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
+    c.mcts.max_moves = float('inf')
+
+    c.training = ml_collections.ConfigDict()
+    c.training.epochs = 50
+    c.training.num_selfplay = 20
+    c.training.buffer_size = 1000
+    c.training.td_steps = 5
+    c.training.batch_size = 128
+    c.training.lr = 2e-4
+    c.training.training_steps = 200
+    c.training.grad_norm_clip = 1.0
+    c.training.log_interval = 200
+    c.training.save_dir = './checkpoints/'
+    c.training.accelerator = 'cpu'
+    c.training.devices = 1
+    c.training.seed = 12315
+
+    c.network = ml_collections.ConfigDict()
+    c.network.v_hsize = 64
+    c.network.p_hsize = 32
+    c.network.mlp_depth = 2
+    c.network.ema_decay = 0.995
+    c.network.num_bins = 51
+    c.network.value_min = -25.0
+    c.network.value_max = 25.0
+
+    return c
+
+
+def set_derived_config(config):
+    m = MAPS[config.map_num]
+    board_h, board_w = m['board_dim']
+    num_qubits = m['num_qubits']
+    board_size = board_h * board_w
+    with config.unlocked():
+        config.env.board_height = board_h
+        config.env.board_width = board_w
+        config.env.num_qubits = num_qubits
+        config.network.num_tasks = len(m['tasks'])
+        config.network.num_qubits = num_qubits
+        config.network.board_size = board_size
+        config.network.num_actions = 1 + num_qubits * board_size

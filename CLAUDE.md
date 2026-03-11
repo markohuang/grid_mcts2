@@ -8,7 +8,7 @@ Uses a uv-managed virtual environment. Always use `.venv/bin/python` (not system
 
 ```bash
 # Install dependencies
-uv pip install torch lightning torchrl tensordict einops numpy
+uv pip install torch lightning torchrl tensordict einops numpy ml_collections absl-py
 
 # Activate for interactive use
 source .venv/bin/activate
@@ -18,22 +18,30 @@ source .venv/bin/activate
 
 ```bash
 # Run training (full)
-.venv/bin/python main.py --epochs 50 --num_selfplay 20 --batch_size 128
+.venv/bin/python main.py --config.training.epochs=50 --config.training.num_selfplay=20 --config.training.batch_size=128
 
 # Quick smoke test with FakeNet (no GPU, no real network)
-.venv/bin/python main.py --use_fake --epochs 2
+.venv/bin/python main.py --config.use_fake=True --config.training.epochs=2
 
 # Small real-network test
-.venv/bin/python main.py --epochs 2 --num_selfplay 2 --batch_size 32 --training_steps 10
+.venv/bin/python main.py --config.training.epochs=1 --config.training.num_selfplay=2 --config.training.batch_size=32 --config.training.training_steps=10
 
 # Run tests (pytest on the moves/parallel-grouping tests)
 .venv/bin/python -m pytest neutral_atoms/test_env.py -v
 
 # Select map (0=2x6/9q, 1=4x4/8q, 2=5x5/12q)
-.venv/bin/python main.py --map_num 1
+.venv/bin/python main.py --config.map_num=1
 ```
 
-Key CLI args: `--num_sims`, `--num_selfplay`, `--training_steps`, `--epochs`, `--batch_size`, `--lr`, `--map_num`, `--use_fake`, `--budget`.
+Config uses `ml_collections.ConfigDict` with `absl` flags. Override any config value with `--config.<path>=<value>` (dot notation for nested fields). See `neutral_atoms/config.py:get_config()` for all available fields.
+
+## Coding Style
+- Compact code with minimal line breaks, no docstrings unless necessary (function name and variable names should be self-explanatory)
+- Fail fast: avoid defensive try-except and if-else for edge cases unless explicitly needed. Do not assume any default values for missing attributes from configs.
+- Prioritize clarity, efficiency, and soundness over over-engineering
+- Helper functions should follow the single responsibility principle (least astonishment) with no side effects that allows for clean logic (does only what the function name suggests).
+- Main function should be broken down with helper functions such that: 1) there is no duplicate code when possible, 2) with help of submodules and variables having self-explanatory naming conventions, basically resembles clean pseudocode and describes the high-level ideas it is trying to achieve
+- Understand config parameters before testing, and always make sure to test with smaller model parameters, training time, etc. first for sanity checks
 
 ## Architecture
 
@@ -71,6 +79,13 @@ Each epoch: **self-play** (MCTS generates games using current network) → **sav
 
 Standard AlphaZero MCTS with environment cloning for simulation. Uses UCB selection, Dirichlet noise at root, softmax temperature for action selection. Each simulation clones the environment and steps through it — no learned dynamics model.
 
+## Config system (`neutral_atoms/config.py`)
+
+- `get_config()` returns a `ml_collections.ConfigDict` with four sub-configs: `env`, `mcts`, `training`, `network`.
+- `set_derived_config(config)` computes map-dependent values (board dims, num_qubits, action space size) and writes them into `config.env` and `config.network`.
+- Map definitions (`MAPS`) and `atom_map_to_positions()` live in `config.py`.
+- Top-level flags: `config.map_num`, `config.use_fake`.
+
 ## Map definitions
 
-Maps are defined in `main.py` as dicts with `board_dim`, `num_qubits`, `atom_map`, and `tasks`. The `tasks` field is a list of gate layers, each layer being a list of qubit pairs.
+Maps are defined in `neutral_atoms/config.py` as dicts with `board_dim`, `num_qubits`, `atom_map`, and `tasks`. The `tasks` field is a list of gate layers, each layer being a list of qubit pairs.

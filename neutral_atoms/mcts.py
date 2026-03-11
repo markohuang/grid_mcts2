@@ -3,9 +3,8 @@ from __future__ import annotations
 import math
 import numpy as np
 import torch
-from typing import Sequence, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from .config import MCTSConfig, KnownBounds
 from .network import Network, NetworkOutput, make_features
 
 if TYPE_CHECKING:
@@ -14,8 +13,14 @@ if TYPE_CHECKING:
 MAXIMUM_FLOAT_VALUE = float('inf')
 
 
+def visit_softmax_temperature(steps):
+    if steps < 500e3:
+        return 2.0
+    return 0.5 if steps < 750e3 else 0.25
+
+
 class Node:
-    def __init__(self, prior: float):
+    def __init__(self, prior):
         self.visit_count = 0
         self.to_play = -1
         self.prior = prior
@@ -23,40 +28,40 @@ class Node:
         self.children = {}
         self.reward = 0
 
-    def expanded(self) -> bool:
+    def expanded(self):
         return bool(self.children)
 
-    def value(self) -> float:
+    def value(self):
         if self.visit_count == 0:
             return 0
         return self.value_sum / self.visit_count
 
 
 class ActionHistory:
-    def __init__(self, history: Sequence[int], action_space_size: int):
+    def __init__(self, history, action_space_size):
         self.history = list(history)
         self.action_space_size = action_space_size
 
     def clone(self):
         return ActionHistory(self.history, self.action_space_size)
 
-    def add_action(self, action: int):
+    def add_action(self, action):
         self.history.append(action)
 
-    def to_play(self) -> int:
+    def to_play(self):
         return -1
 
 
 class MinMaxStats:
-    def __init__(self, known_bounds: Optional[KnownBounds]):
-        self.maximum = known_bounds.max if known_bounds else -MAXIMUM_FLOAT_VALUE
-        self.minimum = known_bounds.min if known_bounds else MAXIMUM_FLOAT_VALUE
+    def __init__(self, known_bounds):
+        self.maximum = known_bounds.max
+        self.minimum = known_bounds.min
 
-    def update(self, value: float):
+    def update(self, value):
         self.maximum = max(self.maximum, value)
         self.minimum = min(self.minimum, value)
 
-    def normalize(self, value: float) -> float:
+    def normalize(self, value):
         if self.maximum > self.minimum:
             return (value - self.minimum) / (self.maximum - self.minimum)
         return value
@@ -64,7 +69,7 @@ class MinMaxStats:
 
 # ---- MCTS Algorithm ----
 
-def play_game(game: Game, config: MCTSConfig, network: Network) -> Game:
+def play_game(game: Game, config, network: Network) -> Game:
     while not game.terminal() and len(game.history) < config.max_moves:
         min_max_stats = MinMaxStats(config.known_bounds)
         root = Node(0)
@@ -85,10 +90,7 @@ def play_game(game: Game, config: MCTSConfig, network: Network) -> Game:
             config, root, game.action_history(), network,
             min_max_stats, game.environment,
         )
-        action = _select_action(
-            config, len(game.history), root, network,
-            game.action_space_size,
-        )
+        action = _select_action(len(game.history), root, network, game.action_space_size)
         game.apply(action)
         game.store_search_statistics(root)
     return game
@@ -120,12 +122,12 @@ def run_mcts(config, root, action_history, network, min_max_stats, env):
         )
 
 
-def _select_action(config, num_moves, node, network, action_space_size):
+def _select_action(num_moves, node, network, action_space_size):
     visit_counts = [
         (child.visit_count, action)
         for action, child in node.children.items()
     ]
-    t = config.visit_softmax_temperature_fn(steps=network.training_steps())
+    t = visit_softmax_temperature(network.training_steps())
     return _softmax_sample(visit_counts, t, action_space_size)
 
 

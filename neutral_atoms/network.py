@@ -7,7 +7,6 @@ from typing import NamedTuple
 
 from einops.layers.torch import Rearrange
 
-from .config import NetworkConfig
 
 
 # ---- Feature Construction ----
@@ -120,7 +119,7 @@ def MLPMixer(*, image_size, channels, patch_size, dim, depth,
 # ---- FakeNet (uniform random for testing) ----
 
 class FakeNet:
-    def __init__(self, cfg: NetworkConfig):
+    def __init__(self, cfg):
         self.num_bins = cfg.num_bins
         self.num_actions = cfg.num_actions
 
@@ -151,7 +150,7 @@ class FakeNet:
 # ---- Value & Policy Networks ----
 
 class ValueNetwork(nn.Module):
-    def __init__(self, cfg: NetworkConfig):
+    def __init__(self, cfg):
         super().__init__()
         self.ntasks = cfg.num_tasks + 1
         self.nqubits = cfg.num_qubits
@@ -184,7 +183,7 @@ class ValueNetwork(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, cfg: NetworkConfig):
+    def __init__(self, cfg):
         super().__init__()
         self.ntasks = cfg.num_tasks + 1
         self.nqubits = cfg.num_qubits
@@ -215,7 +214,7 @@ class PolicyNetwork(nn.Module):
 
 
 class NeutralAtomsMLP2(nn.Module):
-    def __init__(self, cfg: NetworkConfig):
+    def __init__(self, cfg):
         super().__init__()
         self.value_net = ValueNetwork(cfg)
         self.pi_net = PolicyNetwork(cfg)
@@ -232,7 +231,7 @@ class NeutralAtomsMLP2(nn.Module):
 # ---- Main Network Wrapper ----
 
 class Network(nn.Module):
-    def __init__(self, cfg: NetworkConfig, use_fake: bool = False):
+    def __init__(self, cfg, use_fake: bool = False):
         super().__init__()
         self.cfg = cfg
         self.use_fake = use_fake

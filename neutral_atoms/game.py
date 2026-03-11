@@ -1,7 +1,6 @@
 from typing import NamedTuple, Sequence
 
 from .env import NeutralAtomsEnv
-from .types import EnvConfig, Tasks
 from .mcts import Node, ActionHistory
 from .network import make_features
 
@@ -14,37 +13,29 @@ class Target(NamedTuple):
 
 
 class Game:
-    """A single episode of interaction with the environment."""
 
-    def __init__(
-        self,
-        tasks: Tasks,
-        initial_positions: list[tuple[int, int]],
-        env_config: EnvConfig,
-        action_space_size: int,
-        discount: float,
-    ):
+    def __init__(self, config, tasks, initial_positions):
         self.tasks = tasks
         self.initial_positions = initial_positions
-        self.env_config = env_config
-        self.environment = NeutralAtomsEnv(tasks, initial_positions, env_config)
+        self.env_config = config.env
+        self.environment = NeutralAtomsEnv(tasks, initial_positions, config.env)
         self.history = []
         self.rewards = []
         self.child_visits = []
         self.root_values = []
-        self.action_space_size = action_space_size
-        self.discount = discount
+        self.action_space_size = config.network.num_actions
+        self.discount = config.mcts.discount
         self.done = False
         self.last_info = {}
         self.latency_reward = 0.0
 
-    def terminal(self) -> bool:
+    def terminal(self):
         return self.done or not self.environment.legal_actions()
 
-    def legal_actions(self) -> list[int]:
+    def legal_actions(self):
         return self.environment.legal_actions()
 
-    def apply(self, action: int):
+    def apply(self, action):
         result = self.environment.step(action)
         self.rewards.append(result.reward)
         self.history.append(action)
@@ -53,7 +44,7 @@ class Game:
         if self.done and result.info.get('tasks_done', 0) >= len(self.tasks):
             self.latency_reward = -result.info.get('cost', 0.0)
 
-    def store_search_statistics(self, root: Node):
+    def store_search_statistics(self, root):
         sum_visits = sum(child.visit_count for child in root.children.values())
         self.child_visits.append([
             root.children[a].visit_count / sum_visits if a in root.children else 0
@@ -61,12 +52,7 @@ class Game:
         ])
         self.root_values.append(root.value())
 
-    def make_observation(self, state_index: int) -> dict:
-        """Reconstruct observation at a given state index.
-
-        Returns dict with 'features' key ready for network inference.
-        state_index == -1 means current state.
-        """
+    def make_observation(self, state_index):
         if state_index == -1:
             obs = self.environment._get_observation()
         else:
@@ -76,8 +62,7 @@ class Game:
                 obs = env.step(action).observation
         return {'features': make_features(obs, self.tasks)}
 
-    def make_target(self, state_index: int, td_steps: int, to_play: int) -> Target:
-        """Creates the value target for training."""
+    def make_target(self, state_index, td_steps, to_play):
         bootstrap_index = state_index + td_steps
         value = 0.0
         for i, reward in enumerate(self.rewards[state_index:bootstrap_index]):
@@ -95,8 +80,8 @@ class Game:
             bootstrap_discount,
         )
 
-    def to_play(self) -> int:
+    def to_play(self):
         return -1
 
-    def action_history(self) -> ActionHistory:
+    def action_history(self):
         return ActionHistory(self.history, self.action_space_size)

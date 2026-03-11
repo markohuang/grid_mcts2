@@ -6,44 +6,26 @@ from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 
 from .game import Game
 from .mcts import play_game
-from .network import Network
-from .config import MCTSConfig, TrainingConfig
-from .types import EnvConfig, Tasks
 
 
 class AlphaAtomsTrainer:
 
-    def __init__(
-        self,
-        network: Network,
-        mcts_config: MCTSConfig,
-        training_config: TrainingConfig,
-        env_config: EnvConfig,
-        tasks: Tasks,
-        initial_positions: list[tuple[int, int]],
-        action_space_size: int,
-    ):
+    def __init__(self, network, config, tasks, initial_positions):
         self.network = network
-        self.mcts_config = mcts_config
-        self.training_config = training_config
-        self.env_config = env_config
+        self.config = config
         self.tasks = tasks
         self.initial_positions = initial_positions
-        self.action_space_size = action_space_size
         self.replay_buffer = TensorDictReplayBuffer(
-            storage=LazyTensorStorage(training_config.buffer_size)
+            storage=LazyTensorStorage(config.training.buffer_size)
         )
         self.selfplay_iter = 0
 
     def run_selfplay(self):
-        cfg = self.training_config
+        cfg = self.config.training
         self.network.eval()
         for idx in range(cfg.num_selfplay):
-            game = Game(
-                self.tasks, self.initial_positions, self.env_config,
-                self.action_space_size, self.mcts_config.discount,
-            )
-            game = play_game(game, self.mcts_config, self.network)
+            game = Game(self.config, self.tasks, self.initial_positions)
+            game = play_game(game, self.config.mcts, self.network)
             self.save_game(game)
             tasks_done = game.last_info.get('tasks_done', 0)
             print(f"  game {idx+1}/{cfg.num_selfplay}: "
@@ -52,13 +34,9 @@ class AlphaAtomsTrainer:
         self.selfplay_iter += 1
 
     def save_game(self, game):
-        td_steps = self.training_config.td_steps
-        features = []
-        bootstrap_features = []
-        cvals = []
-        lvals = []
-        pis = []
-        bvals = []
+        td_steps = self.config.training.td_steps
+        features, bootstrap_features = [], []
+        cvals, lvals, pis, bvals = [], [], [], []
         for i in range(len(game.history)):
             obs = game.make_observation(i)
             bootstrap_obs = game.make_observation(min(i + td_steps, len(game.history)))
@@ -80,7 +58,7 @@ class AlphaAtomsTrainer:
         self.replay_buffer.extend(observations)
 
     def fit(self, logger=None):
-        cfg = self.training_config
+        cfg = self.config.training
         if self.network.use_fake:
             print("  (FakeNet: skipping training)")
             return
@@ -96,7 +74,6 @@ class AlphaAtomsTrainer:
         optimizer = torch.optim.AdamW(self.network.parameters(), lr=cfg.lr)
         model, optimizer = fabric.setup(self.network, optimizer)
 
-        # Sync EMA shadows to device (Fabric doesn't move non-parameter tensors)
         if hasattr(model, 't_nnet') and hasattr(model.t_nnet, 'to'):
             model.t_nnet.to(fabric.device)
 
@@ -119,7 +96,6 @@ class AlphaAtomsTrainer:
                       f"loss: {loss.item():.4f}")
 
         model.eval()
-
         os.makedirs(cfg.save_dir, exist_ok=True)
         state = {"model": model, "optimizer": optimizer}
         fabric.save(os.path.join(cfg.save_dir, f"checkpoint_{self.selfplay_iter}.ckpt"), state)

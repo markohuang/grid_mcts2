@@ -12,15 +12,6 @@ GATE_ACTION = 0
 EMPTY_CELL = -1
 
 @dataclass
-class EnvConfig:
-    board_height: int
-    board_width: int
-    num_qubits: int
-    budget: int
-    entropy_weight: float = 0.0
-    reward_scale: float = 1.0
-
-@dataclass 
 class StepResult:
     observation: dict
     reward: float

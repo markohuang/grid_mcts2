@@ -1,11 +1,11 @@
 import torch
-from .types import Tasks, EnvConfig, StepResult, GATE_ACTION, EMPTY_CELL, to_json
+from .types import Tasks, StepResult, GATE_ACTION, EMPTY_CELL, to_json
 from .board import create_board, apply_move, action_to_move, get_legal_actions
 from .tasks import is_episode_done
 from .rewards import compute_total_cost, compute_reward, compute_cost_bounds
 
 class NeutralAtomsEnv:
-    def __init__(self, tasks: Tasks, initial_positions: list[tuple[int, int]], config: EnvConfig):
+    def __init__(self, tasks, initial_positions, config):
         self.tasks = tasks
         self.initial_positions = initial_positions
         self.config = config
