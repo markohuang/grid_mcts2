@@ -57,6 +57,10 @@ class EMA:
         for s, p in zip(self.shadow, params):
             s.mul_(self.decay).add_(p.data, alpha=1 - self.decay)
 
+    def to(self, device):
+        self.shadow = [s.to(device) for s in self.shadow]
+        return self
+
     @contextmanager
     def average_parameters(self):
         old = [p.data.clone() for p in self.params]
@@ -249,6 +253,9 @@ class Network(nn.Module):
         features = observation['features']
         if features.dim() == 3:
             features = features[None, :]  # add batch dim
+        if not self.use_fake:
+            device = next(self.nnet.parameters()).device
+            features = features.to(device)
         output = self.nnet(features)
         correctness_logits, latency_logits, pi = output
         correctness_mean = self.logits2values(correctness_logits)

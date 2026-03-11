@@ -93,6 +93,8 @@ def main():
         tasks, initial_positions, action_space_size,
     )
 
+    os.makedirs(training_config.save_dir, exist_ok=True)
+
     for epoch in range(args.epochs):
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         print("Self-play:")

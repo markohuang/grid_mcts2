@@ -1,58 +1,14 @@
+import os
 import torch
-import random
+from lightning import Fabric
+from tensordict import TensorDict
+from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 
 from .game import Game
 from .mcts import play_game
 from .network import Network
 from .config import MCTSConfig, TrainingConfig
 from .types import EnvConfig, Tasks
-
-
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.buffer = []
-        self.position = 0
-
-    def push(self, sample):
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(sample)
-        else:
-            self.buffer[self.position] = sample
-        self.position = (self.position + 1) % self.capacity
-
-    def sample(self, batch_size):
-        batch_size = min(batch_size, len(self.buffer))
-        indices = random.sample(range(len(self.buffer)), batch_size)
-        batch = [self.buffer[i] for i in indices]
-        return self._collate(batch)
-
-    def _collate(self, batch):
-        return {
-            'obs': {
-                'features': torch.stack([s['features'] for s in batch]),
-            },
-            'bootstrap_obs': {
-                'features': torch.stack([s['bootstrap_features'] for s in batch]),
-            },
-            'target': {
-                'correctness_values': torch.tensor(
-                    [s['correctness_value'] for s in batch], dtype=torch.float32
-                ),
-                'latency_values': torch.tensor(
-                    [s['latency_value'] for s in batch], dtype=torch.float32
-                ),
-                'policies': torch.tensor(
-                    [s['policy'] for s in batch], dtype=torch.float32
-                ),
-                'bootstrap_discounts': torch.tensor(
-                    [s['bootstrap_discount'] for s in batch], dtype=torch.float32
-                ),
-            },
-        }
-
-    def __len__(self):
-        return len(self.buffer)
 
 
 class AlphaAtomsTrainer:
@@ -74,7 +30,9 @@ class AlphaAtomsTrainer:
         self.tasks = tasks
         self.initial_positions = initial_positions
         self.action_space_size = action_space_size
-        self.replay_buffer = ReplayBuffer(training_config.buffer_size)
+        self.replay_buffer = TensorDictReplayBuffer(
+            storage=LazyTensorStorage(training_config.buffer_size)
+        )
         self.selfplay_iter = 0
 
     def run_selfplay(self):
@@ -94,21 +52,34 @@ class AlphaAtomsTrainer:
         self.selfplay_iter += 1
 
     def save_game(self, game):
-        td = self.training_config.td_steps
+        td_steps = self.training_config.td_steps
+        features = []
+        bootstrap_features = []
+        cvals = []
+        lvals = []
+        pis = []
+        bvals = []
         for i in range(len(game.history)):
             obs = game.make_observation(i)
-            bootstrap_obs = game.make_observation(min(i + td, len(game.history)))
-            target = game.make_target(i, td, -1)
-            self.replay_buffer.push({
-                'features': obs['features'].float(),
-                'bootstrap_features': bootstrap_obs['features'].float(),
-                'correctness_value': target.correctness_value,
-                'latency_value': target.latency_value,
-                'policy': target.policy,
-                'bootstrap_discount': target.bootstrap_discount,
-            })
+            bootstrap_obs = game.make_observation(min(i + td_steps, len(game.history)))
+            target = game.make_target(i, td_steps, -1)
+            features.append(obs['features'].float())
+            bootstrap_features.append(bootstrap_obs['features'].float())
+            cvals.append(target.correctness_value)
+            lvals.append(target.latency_value)
+            pis.append(target.policy)
+            bvals.append(target.bootstrap_discount)
+        observations = TensorDict({
+            ('obs', 'features'): torch.stack(features),
+            ('bootstrap_obs', 'features'): torch.stack(bootstrap_features),
+            ('target', 'correctness_values'): torch.tensor(cvals, dtype=torch.float32),
+            ('target', 'latency_values'): torch.tensor(lvals, dtype=torch.float32),
+            ('target', 'policies'): torch.tensor(pis, dtype=torch.float32),
+            ('target', 'bootstrap_discounts'): torch.tensor(bvals, dtype=torch.float32),
+        }, batch_size=len(game.history))
+        self.replay_buffer.extend(observations)
 
-    def fit(self):
+    def fit(self, logger=None):
         cfg = self.training_config
         if self.network.use_fake:
             print("  (FakeNet: skipping training)")
@@ -117,21 +88,38 @@ class AlphaAtomsTrainer:
             print(f"  buffer too small ({len(self.replay_buffer)}), skipping training")
             return
 
-        self.network.train()
-        optimizer = torch.optim.AdamW(self.network.parameters(), lr=cfg.lr)
+        loggers = [logger] if logger is not None else []
+        fabric = Fabric(accelerator=cfg.accelerator, devices=cfg.devices, loggers=loggers)
+        fabric.seed_everything(cfg.seed)
+        fabric.launch()
 
+        optimizer = torch.optim.AdamW(self.network.parameters(), lr=cfg.lr)
+        model, optimizer = fabric.setup(self.network, optimizer)
+
+        # Sync EMA shadows to device (Fabric doesn't move non-parameter tensors)
+        if hasattr(model, 't_nnet') and hasattr(model.t_nnet, 'to'):
+            model.t_nnet.to(fabric.device)
+
+        model.train()
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
-            loss = self.network(batch)
+            batch = batch.to(fabric.device)
+            loss = model(batch)
             optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), cfg.grad_norm_clip)
+            fabric.backward(loss)
+            fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)
             optimizer.step()
-            self.network.t_nnet.update(self.network.nnet.parameters())
-            self.network._training_steps += 1
+            model.t_nnet.update(model.nnet.parameters())
+            model._training_steps += 1
 
             if (iteration + 1) % cfg.log_interval == 0:
+                if loggers:
+                    fabric.log_dict({"train/loss": loss.item()})
                 print(f"  step {iteration+1}/{cfg.training_steps}, "
                       f"loss: {loss.item():.4f}")
 
-        self.network.eval()
+        model.eval()
+
+        os.makedirs(cfg.save_dir, exist_ok=True)
+        state = {"model": model, "optimizer": optimizer}
+        fabric.save(os.path.join(cfg.save_dir, f"checkpoint_{self.selfplay_iter}.ckpt"), state)
