@@ -291,16 +291,22 @@ class Network(nn.Module):
             + 0.5 * bootstrap_discount * (target_correctness + bootstrap_cv)
         ).clip(self.cfg.value_min, self.cfg.value_max)
 
-        loss = F.cross_entropy(predictions.policy_logits, target_policy)
-        loss += F.cross_entropy(
+        policy_loss = F.cross_entropy(predictions.policy_logits, target_policy)
+        correctness_loss = F.cross_entropy(
             predictions.correctness_value_logits,
             self.to_onehot(target_correctness)
         )
-        loss += F.cross_entropy(
+        latency_loss = F.cross_entropy(
             predictions.latency_value_logits,
             self.to_onehot(target_latency)
         )
-        return loss.mean()
+        total = (policy_loss + correctness_loss + latency_loss).mean()
+        return {
+            'total': total,
+            'policy': policy_loss.mean().item(),
+            'correctness': correctness_loss.mean().item(),
+            'latency': latency_loss.mean().item(),
+        }
 
     def logits2values(self, logits):
         return (torch.exp(logits) @ self.categories).squeeze(-1)

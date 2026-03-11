@@ -86,24 +86,28 @@ class AlphaAtomsTrainer:
         fabric, model, optimizer = self._fabric, self._model, self._optimizer
 
         model.train()
-        last_loss = None
+        last_losses = None
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
-            loss = model(batch)
+            losses = model(batch)
             optimizer.zero_grad()
-            fabric.backward(loss)
+            fabric.backward(losses['total'])
             fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)
             optimizer.step()
             model.t_nnet.update(model.nnet.parameters())
             model._training_steps += 1
-            last_loss = loss.item()
+            last_losses = {k: (v.item() if hasattr(v, 'item') else v) for k, v in losses.items()}
 
             if (iteration + 1) % cfg.log_interval == 0:
-                print(f"  step {iteration+1}/{cfg.training_steps}, loss: {last_loss:.4f}")
+                print(f"  step {iteration+1}/{cfg.training_steps}, "
+                      f"loss: {last_losses['total']:.4f} "
+                      f"(pi={last_losses['policy']:.3f} "
+                      f"cv={last_losses['correctness']:.3f} "
+                      f"lv={last_losses['latency']:.3f})")
 
         model.eval()
-        return {'loss': last_loss}
+        return last_losses
 
     def save_checkpoint(self, path):
         if self.network.use_fake:

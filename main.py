@@ -6,7 +6,8 @@ from neutral_atoms.config import get_config, MAPS, atom_map_to_positions, set_de
 from neutral_atoms.network import Network
 from neutral_atoms.trainer import AlphaAtomsTrainer
 from neutral_atoms.experiment import (
-    create_run_dir, selfplay_metrics, save_solution, append_to_registry,
+    create_run_dir, selfplay_metrics, save_solution,
+    append_epoch_metrics, append_to_registry,
 )
 
 _CONFIG = config_flags.DEFINE_config_dict('config', get_config())
@@ -19,6 +20,19 @@ def print_config_summary(config, network):
     if not config.use_fake:
         n_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
         print(f"Trainable params: {n_params}")
+
+
+def format_selfplay_summary(sp_metrics):
+    parts = [f"completion={sp_metrics['completion_rate']:.0%}"]
+    parts.append(f"avg_steps={sp_metrics['avg_steps']:.1f}")
+    if 'best_cost' in sp_metrics:
+        parts.append(f"best_cost={sp_metrics['best_cost']}")
+        parts.append(f"avg_cost={sp_metrics['avg_cost']:.1f}")
+    if 'avg_root_value' in sp_metrics:
+        parts.append(f"root_val={sp_metrics['avg_root_value']:.2f}")
+    if 'avg_policy_entropy' in sp_metrics:
+        parts.append(f"pi_entropy={sp_metrics['avg_policy_entropy']:.2f}")
+    return ', '.join(parts)
 
 
 def main(_):
@@ -48,6 +62,7 @@ def main(_):
         print("Self-play:")
         games = trainer.run_selfplay()
         sp_metrics = selfplay_metrics(games, len(tasks))
+        print(f"  >> {format_selfplay_summary(sp_metrics)}")
 
         if 'best_cost' in sp_metrics:
             if sp_metrics['best_cost'] < best_cost:
@@ -56,15 +71,20 @@ def main(_):
                 no_improve_count = 0
             else:
                 no_improve_count += 1
-            print(f"  best_cost={best_cost}, avg_cost={sp_metrics['avg_cost']:.1f}, "
-                  f"completion={sp_metrics['completion_rate']:.0%}")
-        else:
-            print(f"  no completed games, completion={sp_metrics['completion_rate']:.0%}")
 
         print("Training:")
         train_result = trainer.fit()
+
+        # Log epoch metrics
+        epoch_metrics = {
+            'epoch': epochs_completed,
+            **{k: v for k, v in sp_metrics.items() if k != 'best_game'},
+            'best_cost_so_far': best_cost if best_cost < float('inf') else None,
+        }
         if train_result:
-            run_metrics['final_loss'] = train_result['loss']
+            epoch_metrics.update({f'train_{k}': v for k, v in train_result.items()})
+            run_metrics['final_loss'] = train_result['total']
+        append_epoch_metrics(run_dir, epoch_metrics)
 
         if (epoch + 1) % config.experiment.checkpoint_every_n_epochs == 0:
             ckpt_path = os.path.join(run_dir, 'checkpoints', f'epoch_{epoch+1:03d}.ckpt')

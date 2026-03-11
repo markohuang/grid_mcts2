@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import hashlib
 import time
@@ -119,7 +120,25 @@ def selfplay_metrics(games, num_tasks):
         metrics['avg_cost'] = sum(costs) / len(costs)
         best_idx = costs.index(min(costs))
         metrics['best_game'] = completed[best_idx]
+    # MCTS diagnostics
+    all_root_values = [v for g in games for v in g.root_values]
+    if all_root_values:
+        metrics['avg_root_value'] = sum(all_root_values) / len(all_root_values)
+    all_entropies = []
+    for g in games:
+        for visits in g.child_visits:
+            probs = [p for p in visits if p > 0]
+            if probs:
+                all_entropies.append(-sum(p * math.log(p) for p in probs))
+    if all_entropies:
+        metrics['avg_policy_entropy'] = sum(all_entropies) / len(all_entropies)
     return metrics
+
+
+def append_epoch_metrics(run_dir, metrics):
+    path = os.path.join(run_dir, 'metrics.jsonl')
+    with open(path, 'a') as f:
+        f.write(json.dumps(metrics) + '\n')
 
 
 def append_to_registry(output_dir, run_id, config, metrics):
