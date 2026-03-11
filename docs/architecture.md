@@ -96,37 +96,97 @@ Episode ends when:
 - All gate layers executed (`tasks_done == num_tasks`), OR
 - Action budget exhausted (`len(actions) >= budget`)
 
+## Device Lifecycle
+
+1. Network starts on CPU. First `trainer.fit()` call sets up Lightning Fabric once via `_setup_fabric()`, moving the model to GPU via `fabric.setup()`.
+2. Fabric, wrapped model, and optimizer are stored as trainer instance state and reused across epochs.
+3. During self-play, the network stays on its device. `Network.inference()` moves CPU observations to the model's device automatically.
+4. EMA shadow parameters (target network) are synced to device via `EMA.to(device)` after `fabric.setup()`.
+5. Environment always runs on CPU — this is correct and intentional.
+
 ## File Structure
 
 ```
+main.py                    # Entry point: config loading, epoch loop, early stopping
 neutral_atoms/
-├── __init__.py    # Package init
-├── types.py       # Type aliases (Board, AtomPositions, Move, etc.), constants, EnvConfig
-├── config.py      # MCTSConfig, TrainingConfig, NetworkConfig dataclasses
-├── board.py       # Board creation, move application, action encoding/decoding
-├── moves.py       # Vectorized parallel grouping, canonicalization, graph coloring
-├── tasks.py       # Gate layer utilities (gates_to_moves, is_episode_done)
-├── rewards.py     # Cost computation (parallel groups + entropy), reward function
-├── env.py         # NeutralAtomsEnv: step, reset, clone, legal_actions, observation
-├── game.py        # Game: episode wrapper with history, targets, search stats
-├── mcts.py        # MCTS: tree search, UCB, expansion, backprop, action selection
-├── network.py     # MLPMixer value/policy nets, EMA, FakeNet
-├── trainer.py     # AlphaAtomsTrainer: self-play loop, replay buffer, training
-└── test_env.py    # Tests
+├── __init__.py            # Package exports
+├── types.py               # Type aliases (Board, AtomPositions, Move, etc.), StepResult, constants
+├── config.py              # ml_collections ConfigDict (get_config, set_derived_config), MAPS
+├── board.py               # Board creation, move application, action encoding/decoding
+├── moves.py               # Vectorized parallel grouping, canonicalization, graph coloring
+├── tasks.py               # Gate layer utilities (gates_to_moves, is_episode_done)
+├── rewards.py             # Cost computation (parallel groups + entropy), reward function
+├── env.py                 # NeutralAtomsEnv: step, reset, clone, legal_actions, observation
+├── game.py                # Game: episode wrapper with history, targets, search stats
+├── mcts.py                # MCTS: tree search, UCB, expansion, backprop, action selection
+├── network.py             # MLPMixer value/policy nets, EMA, FakeNet, make_features
+├── trainer.py             # AlphaAtomsTrainer: self-play, replay buffer, Fabric training
+├── experiment.py          # Run tracking: directories, solution export, cost metrics, registry
+└── test_env.py            # Tests for parallel grouping / move canonicalization
+```
+
+## Key Interfaces
+
+### trainer.py: AlphaAtomsTrainer
+
+```python
+trainer = AlphaAtomsTrainer(network, config, tasks, initial_positions)
+games = trainer.run_selfplay()   # returns list[Game], saves to replay buffer
+result = trainer.fit()           # returns {'loss': float} or None (FakeNet/buffer too small)
+trainer.save_checkpoint(path)    # saves via Fabric (model + optimizer state)
+```
+
+Fabric is set up once on first `fit()` call and reused. The trainer owns the Fabric, wrapped model, and optimizer as instance state.
+
+### experiment.py
+
+```python
+run_id, run_dir = create_run_dir(config)          # creates outputs/<run_id>/, saves config.json
+cost = compute_solution_cost(game)                 # replays game, sums reconfig + gate groups
+solution = save_solution(game, path)               # writes atom-viz compatible JSON
+metrics = selfplay_metrics(games, num_tasks)        # {best_cost, avg_cost, completion_rate, best_game}
+append_to_registry(output_dir, run_id, config, m)  # appends to run_registry.jsonl
+```
+
+### game.py: Game
+
+```python
+game = Game(config, tasks, initial_positions)  # takes full config, accesses config.env/mcts/network
+game.apply(action)                             # steps env, records reward/history
+obs = game.make_observation(state_index)       # replays to reconstruct observation at step i
+target = game.make_target(i, td_steps, to_play) # TD return + MCTS policy target
 ```
 
 ## Key Hyperparameters
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `num_simulations` | 50 | MCTS simulations per decision |
-| `num_selfplay` | 20 | Games per epoch |
-| `buffer_size` | 1000 | Replay buffer capacity |
-| `batch_size` | 128 | Training batch size |
-| `training_steps` | 200 | Gradient steps per epoch |
-| `td_steps` | 5 | TD bootstrap horizon |
-| `discount` | 1.0 | MCTS discount factor |
-| `budget` | 24 | Max actions per episode |
-| `num_bins` | 51 | Value distribution bins |
-| `ema_decay` | 0.995 | Target network EMA |
-| `pb_c_base/init` | 19652 / 1.25 | UCB exploration constants |
+| `mcts.num_simulations` | 50 | MCTS simulations per decision |
+| `mcts.discount` | 1.0 | MCTS discount factor |
+| `mcts.pb_c_base/init` | 19652 / 1.25 | UCB exploration constants |
+| `training.num_selfplay` | 20 | Games per epoch |
+| `training.buffer_size` | 1000 | Replay buffer capacity |
+| `training.batch_size` | 128 | Training batch size |
+| `training.training_steps` | 200 | Gradient steps per epoch |
+| `training.td_steps` | 5 | TD bootstrap horizon |
+| `training.lr` | 2e-4 | AdamW learning rate |
+| `env.budget` | 24 | Max actions per episode |
+| `network.num_bins` | 51 | Value distribution bins |
+| `network.ema_decay` | 0.995 | Target network EMA |
+| `network.v_hsize` | 64 | Value network hidden size |
+| `network.p_hsize` | 32 | Policy network hidden size |
+| `network.mlp_depth` | 2 | MLPMixer depth |
+| `experiment.checkpoint_every_n_epochs` | 10 | Periodic checkpoint interval |
+| `experiment.early_stopping_patience` | 10 | Epochs without improvement before stopping |
+
+## Maps
+
+Defined in `config.py` as `MAPS` list. Each map specifies:
+- `board_dim`: (rows, cols)
+- `num_qubits`: number of atoms
+- `atom_map`: flat indices for initial atom placement
+- `tasks`: list of gate layers, each a list of `[q1, q2]` pairs
+
+Available maps: `0` = 2x6/9q, `1` = 4x4/8q, `2` = 5x5/12q. Selected via `--config.map_num=N`.
+
+Derived values (set by `set_derived_config`): `env.board_height/width/num_qubits`, `network.num_tasks/num_qubits/board_size/num_actions`.

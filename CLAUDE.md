@@ -49,17 +49,21 @@ This is an AlphaZero-style MCTS training system for neutral atom quantum computi
 
 ### Training loop (`main.py` → `trainer.py`)
 
-Each epoch: **self-play** (MCTS generates games using current network) → **save to replay buffer** → **train** (gradient steps on sampled batches).
+Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **train** (gradient steps on sampled batches) → **checkpoint/early-stop**.
 
+- `run_selfplay()` returns a list of `Game` objects (also saves to replay buffer internally).
+- `fit()` returns `{'loss': float}` or `None` (FakeNet / buffer too small).
+- `save_checkpoint(path)` saves model + optimizer via Fabric.
 - `trainer.py` uses **Lightning Fabric** for device management (CPU/GPU) and **torchrl's `TensorDictReplayBuffer`** for experience storage.
-- Training data is stored as `TensorDict` with nested keys: `('obs', 'features')`, `('bootstrap_obs', 'features')`, `('target', 'correctness_values')`, etc. The `Network.forward(batch)` accesses these as `batch['obs']['features']`.
+- Training data is stored as `TensorDict` with nested keys: `('obs', 'features')`, `('bootstrap_obs', 'features')`, `('target', 'correctness_values')`, etc.
 
 ### Device lifecycle
 
-1. Network starts on CPU. First `fit()` call moves it to GPU via `fabric.setup()`.
-2. During subsequent self-play, the network stays on GPU. `Network.inference()` moves CPU observations to the model's device automatically.
-3. EMA shadow parameters (target network) are synced to device via `EMA.to(device)` after `fabric.setup()`.
-4. Environment always runs on CPU — this is correct and intentional.
+1. Network starts on CPU. First `fit()` call sets up Fabric once via `_setup_fabric()` and moves model to GPU.
+2. Fabric, wrapped model, and optimizer persist as trainer state across epochs.
+3. During self-play, `Network.inference()` moves CPU observations to the model's device automatically.
+4. EMA shadow parameters synced to device via `EMA.to(device)` after `fabric.setup()`.
+5. Environment always runs on CPU — this is correct and intentional.
 
 ### Network (`network.py`)
 
