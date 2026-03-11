@@ -1,0 +1,310 @@
+import torch
+from torch import nn
+from torch.nn import functional as F
+from functools import partial
+from contextlib import contextmanager
+from typing import NamedTuple
+
+from einops.layers.torch import Rearrange
+
+from .config import NetworkConfig
+
+
+# ---- Feature Construction ----
+
+def make_features(observation: dict, tasks: list) -> torch.Tensor:
+    """Convert raw env observation to network features.
+
+    Returns: (num_tasks+1, board_size, num_qubits) tensor.
+    Slot 0 is the raw board state (blank reference).
+    Slots 1..num_tasks encode board state + gate pair indicators for each task layer.
+    """
+    board_onehot = observation['board_onehot']  # (board_size, num_qubits+1)
+    board_feat = board_onehot[:, :-1]  # (board_size, num_qubits) drop empty channel
+    tasks_done = observation['tasks_done']
+    num_tasks = len(tasks)
+
+    features = [board_feat.clone()]  # slot 0: blank reference
+    for t in range(num_tasks):
+        feat = board_feat.clone()
+        if t >= tasks_done:
+            for q1, q2 in tasks[t]:
+                feat[:, q1] += 1.0
+                feat[:, q2] += 1.0
+        features.append(feat)
+    return torch.stack(features)  # (num_tasks+1, board_size, num_qubits)
+
+
+# ---- Network Output ----
+
+class NetworkOutput(NamedTuple):
+    value: float
+    correctness_value_logits: torch.Tensor
+    latency_value_logits: torch.Tensor
+    policy_logits: list
+
+
+# ---- EMA ----
+
+class EMA:
+    def __init__(self, parameters, decay):
+        self.decay = decay
+        self.params = list(parameters)
+        self.shadow = [p.data.clone() for p in self.params]
+
+    def update(self, parameters=None):
+        params = list(parameters) if parameters is not None else self.params
+        for s, p in zip(self.shadow, params):
+            s.mul_(self.decay).add_(p.data, alpha=1 - self.decay)
+
+    @contextmanager
+    def average_parameters(self):
+        old = [p.data.clone() for p in self.params]
+        for p, s in zip(self.params, self.shadow):
+            p.data.copy_(s)
+        yield
+        for p, o in zip(self.params, old):
+            p.data.copy_(o)
+
+
+# ---- Building Blocks ----
+
+pair = lambda x: x if isinstance(x, tuple) else (x, x)
+
+
+class PreNormResidual(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.fn = fn
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        return self.fn(self.norm(x)) + x
+
+
+def FeedForward(dim, expansion_factor=4, dropout=0., dense=nn.Linear):
+    inner_dim = int(dim * expansion_factor)
+    return nn.Sequential(
+        dense(dim, inner_dim),
+        nn.GELU(),
+        nn.Dropout(dropout),
+        dense(inner_dim, dim),
+        nn.Dropout(dropout)
+    )
+
+
+def MLPMixer(*, image_size, channels, patch_size, dim, depth,
+             expansion_factor=4, expansion_factor_token=0.5, dropout=0.):
+    image_h, image_w = pair(image_size)
+    assert (image_h % patch_size) == 0 and (image_w % patch_size) == 0
+    num_patches = (image_h // patch_size) * (image_w // patch_size)
+    chan_first, chan_last = partial(nn.Conv1d, kernel_size=1), nn.Linear
+    return nn.Sequential(
+        Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+                  p1=patch_size, p2=patch_size),
+        nn.Linear((patch_size ** 2) * channels, dim),
+        *[nn.Sequential(
+            PreNormResidual(dim, FeedForward(num_patches, expansion_factor,
+                                            dropout, chan_first)),
+            PreNormResidual(dim, FeedForward(dim, expansion_factor_token,
+                                            dropout, chan_last))
+        ) for _ in range(depth)],
+        nn.LayerNorm(dim)
+    )
+
+
+# ---- FakeNet (uniform random for testing) ----
+
+class FakeNet:
+    def __init__(self, cfg: NetworkConfig):
+        self.num_bins = cfg.num_bins
+        self.num_actions = cfg.num_actions
+
+    def __call__(self, *args, **kwargs):
+        val = torch.ones(1, self.num_bins)
+        pi = torch.ones(1, self.num_actions)
+        return (F.log_softmax(val, dim=1),
+                F.log_softmax(val, dim=1),
+                F.log_softmax(pi, dim=1))
+
+    def parameters(self):
+        return iter([])
+
+    def update(self, *args, **kwargs):
+        pass
+
+    @contextmanager
+    def average_parameters(self):
+        yield
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+# ---- Value & Policy Networks ----
+
+class ValueNetwork(nn.Module):
+    def __init__(self, cfg: NetworkConfig):
+        super().__init__()
+        self.ntasks = cfg.num_tasks + 1
+        self.nqubits = cfg.num_qubits
+        self.board_size = cfg.board_size
+        self.mixer1 = MLPMixer(
+            channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.v_hsize,
+            image_size=(self.nqubits, 1), patch_size=1
+        )
+        self.mixer2 = MLPMixer(
+            channels=self.nqubits * cfg.v_hsize, depth=cfg.mlp_depth,
+            dim=cfg.v_hsize, image_size=(self.ntasks, 1), patch_size=1
+        )
+        self.W_correctness = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
+        self.W_latency = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
+        self.W_gate_action = nn.Linear(self.ntasks * cfg.v_hsize, 1)
+        for w in [self.W_correctness, self.W_latency, self.W_gate_action]:
+            w.weight.data /= 100
+            w.bias.data /= 100
+        self.softplus = nn.Softplus()
+
+    def forward(self, grids):
+        bs, ntasks = grids.shape[:2]
+        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))
+        x = self.mixer2(
+            x.reshape(bs, ntasks, -1).permute(0, 2, 1).unsqueeze(-1)
+        )
+        flat = x.flatten(1)
+        return (self.W_correctness(flat), self.W_latency(flat),
+                self.softplus(self.W_gate_action(flat)))
+
+
+class PolicyNetwork(nn.Module):
+    def __init__(self, cfg: NetworkConfig):
+        super().__init__()
+        self.ntasks = cfg.num_tasks + 1
+        self.nqubits = cfg.num_qubits
+        self.board_size = cfg.board_size
+        self.mixer1 = MLPMixer(
+            channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.p_hsize,
+            image_size=(self.nqubits, 1), patch_size=1
+        )
+        self.mixer2 = MLPMixer(
+            channels=self.ntasks * cfg.p_hsize, depth=cfg.mlp_depth,
+            dim=cfg.p_hsize, image_size=(self.nqubits, 1), patch_size=1
+        )
+        self.W_pi = nn.Linear(cfg.p_hsize, self.board_size)
+        self.W_pi.weight.data /= 100
+        self.W_pi.bias.data /= 100
+        self.softplus = nn.Softplus()
+
+    def forward(self, grids):
+        bs, ntasks = grids.shape[:2]
+        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))
+        _, nqubits, dim = x.shape
+        x = self.mixer2(
+            x.reshape(bs, ntasks, nqubits, dim, 1)
+             .permute(0, 1, 3, 2, 4)
+             .flatten(1, 2)
+        )
+        return self.softplus(self.W_pi(x).squeeze(-1))
+
+
+class NeutralAtomsMLP2(nn.Module):
+    def __init__(self, cfg: NetworkConfig):
+        super().__init__()
+        self.value_net = ValueNetwork(cfg)
+        self.pi_net = PolicyNetwork(cfg)
+
+    def forward(self, features):
+        cval, lval, gate_action = self.value_net(features)
+        pi = self.pi_net(features)
+        pi = torch.cat((gate_action, pi.flatten(start_dim=1)), dim=-1)
+        return (F.log_softmax(cval, dim=1),
+                F.log_softmax(lval, dim=1),
+                F.log_softmax(pi, dim=1))
+
+
+# ---- Main Network Wrapper ----
+
+class Network(nn.Module):
+    def __init__(self, cfg: NetworkConfig, use_fake: bool = False):
+        super().__init__()
+        self.cfg = cfg
+        self.use_fake = use_fake
+        self.action_space_size = cfg.num_actions
+        if use_fake:
+            self.nnet = FakeNet(cfg)
+            self.t_nnet = FakeNet(cfg)
+        else:
+            self.nnet = NeutralAtomsMLP2(cfg)
+            self.t_nnet = EMA(self.nnet.parameters(), decay=cfg.ema_decay)
+        self.register_buffer(
+            'categories',
+            torch.linspace(cfg.value_min, cfg.value_max, steps=cfg.num_bins)[:, None]
+        )
+        self._training_steps = 0
+
+    def inference(self, observation: dict, aslist=False) -> NetworkOutput:
+        features = observation['features']
+        if features.dim() == 3:
+            features = features[None, :]  # add batch dim
+        output = self.nnet(features)
+        correctness_logits, latency_logits, pi = output
+        correctness_mean = self.logits2values(correctness_logits)
+        latency_mean = self.logits2values(latency_logits)
+        if aslist:
+            return NetworkOutput(
+                value=(correctness_mean + latency_mean).item(),
+                correctness_value_logits=correctness_logits.squeeze(),
+                latency_value_logits=latency_logits.squeeze(),
+                policy_logits=pi.squeeze().tolist(),
+            )
+        return NetworkOutput(
+            value=correctness_mean + latency_mean,
+            correctness_value_logits=correctness_logits,
+            latency_value_logits=latency_logits,
+            policy_logits=pi,
+        )
+
+    def forward(self, batch):
+        predictions = self.inference(batch['obs'])
+        with self.t_nnet.average_parameters(), torch.no_grad():
+            bootstrap_predictions = self.inference(batch['bootstrap_obs'])
+
+        target_correctness = batch['target']['correctness_values']
+        target_latency = batch['target']['latency_values']
+        target_policy = batch['target']['policies']
+        bootstrap_discount = batch['target']['bootstrap_discounts']
+
+        bootstrap_cv = self.logits2values(
+            bootstrap_predictions.correctness_value_logits
+        )
+        target_correctness = (
+            (1 - bootstrap_discount) * target_correctness
+            + 0.5 * bootstrap_discount * (target_correctness + bootstrap_cv)
+        ).clip(self.cfg.value_min, self.cfg.value_max)
+
+        loss = F.cross_entropy(predictions.policy_logits, target_policy)
+        loss += F.cross_entropy(
+            predictions.correctness_value_logits,
+            self.to_onehot(target_correctness)
+        )
+        loss += F.cross_entropy(
+            predictions.latency_value_logits,
+            self.to_onehot(target_latency)
+        )
+        return loss.mean()
+
+    def logits2values(self, logits):
+        return (torch.exp(logits) @ self.categories).squeeze(-1)
+
+    def to_onehot(self, val):
+        buckets = self.categories.squeeze()
+        return F.one_hot(
+            torch.bucketize(val, buckets).clamp(0, self.cfg.num_bins - 1),
+            num_classes=self.cfg.num_bins
+        ).float()
+
+    def training_steps(self) -> int:
+        return self._training_steps
