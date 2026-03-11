@@ -81,10 +81,23 @@ Standard AlphaZero MCTS with environment cloning for simulation. Uses UCB select
 
 ## Config system (`neutral_atoms/config.py`)
 
-- `get_config()` returns a `ml_collections.ConfigDict` with four sub-configs: `env`, `mcts`, `training`, `network`.
+- `get_config()` returns a `ml_collections.ConfigDict` with five sub-configs: `env`, `mcts`, `training`, `network`, `experiment`.
 - `set_derived_config(config)` computes map-dependent values (board dims, num_qubits, action space size) and writes them into `config.env` and `config.network`.
 - Map definitions (`MAPS`) and `atom_map_to_positions()` live in `config.py`.
 - Top-level flags: `config.map_num`, `config.use_fake`.
+
+## Experiment tracking (`neutral_atoms/experiment.py`)
+
+Each run creates `outputs/<run_id>/` with:
+- `config.json` — frozen ConfigDict snapshot
+- `checkpoints/` — periodic + final model checkpoints (Lightning Fabric)
+- `solutions/best.json` — atom-viz compatible JSON (board, circuit, plan)
+
+`outputs/run_registry.jsonl` tracks all completed runs with config + metrics.
+
+Early stopping: training halts if `best_cost` doesn't improve for `experiment.early_stopping_patience` epochs (only counts epochs with completed games).
+
+Total cost metric = reconfig parallel groups + gate execution groups (2x per layer for enter/exit).
 
 ## Map definitions
 

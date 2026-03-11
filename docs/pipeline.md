@@ -12,8 +12,11 @@ Given a grid of neutral atoms and a sequence of quantum gate layers (each layer 
 │                                                             │
 │  1. Load config (ml_collections ConfigDict + absl flags)    │
 │  2. Derive map-specific values (board dims, action space)   │
-│  3. Create Network + Trainer                                │
-│  4. For each epoch: self-play → train                       │
+│  3. Create run directory (outputs/<run_id>/)                │
+│  4. Create Network + Trainer                                │
+│  5. For each epoch: self-play → metrics → train → checkpoint│
+│  6. Early stopping if best_cost plateaus                    │
+│  7. Save best solution + final checkpoint + registry entry  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -159,10 +162,37 @@ config
 │   ├── epochs, num_selfplay, training_steps
 │   ├── batch_size, lr, grad_norm_clip
 │   ├── buffer_size, td_steps
-│   ├── log_interval, save_dir
+│   ├── log_interval
 │   └── accelerator, devices, seed
+├── experiment
+│   ├── output_dir                             (default: ./outputs)
+│   ├── checkpoint_every_n_epochs              (default: 10)
+│   └── early_stopping_patience                (default: 10)
 └── network
     ├── v_hsize, p_hsize, mlp_depth
     ├── ema_decay, num_bins, value_min, value_max
     └── num_tasks, num_qubits, board_size, num_actions  (derived from map)
 ```
+
+### Experiment tracking (experiment.py)
+
+```
+outputs/
+├── run_registry.jsonl              # one JSON line per completed run
+└── <run_id>/                       # 8-char hex hash
+    ├── config.json                 # frozen ConfigDict
+    ├── checkpoints/
+    │   ├── epoch_010.ckpt          # periodic (every checkpoint_every_n_epochs)
+    │   └── final.ckpt              # always saved at end
+    └── solutions/
+        └── best.json               # atom-viz compatible (board + circuit + plan)
+```
+
+**Total cost** = reconfig parallel groups + gate execution groups (2x per layer for AOD enter/exit).
+
+**Early stopping**: tracks `best_cost` across completed games per epoch. After `early_stopping_patience` consecutive epochs without improvement (only counting epochs with completions), training halts.
+
+**Solution format** (atom-viz compatible):
+- `board`: rows, cols, initialAtoms (dict of atom_id → {row, col})
+- `circuit`: list of gate layers (list of qubit pairs)
+- `plan`: list of parallel move groups, each group is list of {atom, from, to}

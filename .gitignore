@@ -34,6 +34,10 @@ Thumbs.db
 # Archives
 *.zip
 
+# Training outputs
+outputs/
+checkpoints/
+
 # Claude
 .claude/
 

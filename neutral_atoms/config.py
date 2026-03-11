@@ -54,7 +54,7 @@ def get_config():
     c.mcts.root_dirichlet_alpha = 0.03
     c.mcts.root_exploration_fraction = 0.25
     c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
-    c.mcts.max_moves = float('inf')
+    c.mcts.max_moves = 10000
 
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50
@@ -66,10 +66,14 @@ def get_config():
     c.training.training_steps = 200
     c.training.grad_norm_clip = 1.0
     c.training.log_interval = 200
-    c.training.save_dir = './checkpoints/'
     c.training.accelerator = 'cpu'
     c.training.devices = 1
     c.training.seed = 12315
+
+    c.experiment = ml_collections.ConfigDict()
+    c.experiment.output_dir = './outputs'
+    c.experiment.checkpoint_every_n_epochs = 10
+    c.experiment.early_stopping_patience = 10
 
     c.network = ml_collections.ConfigDict()
     c.network.v_hsize = 64

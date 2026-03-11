@@ -1,4 +1,3 @@
-import os
 import torch
 from lightning import Fabric
 from tensordict import TensorDict
@@ -19,19 +18,36 @@ class AlphaAtomsTrainer:
             storage=LazyTensorStorage(config.training.buffer_size)
         )
         self.selfplay_iter = 0
+        self._fabric = None
+        self._model = None
+        self._optimizer = None
+
+    def _setup_fabric(self):
+        if self._fabric is not None:
+            return
+        cfg = self.config.training
+        self._fabric = Fabric(accelerator=cfg.accelerator, devices=cfg.devices)
+        self._fabric.seed_everything(cfg.seed)
+        self._fabric.launch()
+        self._optimizer = torch.optim.AdamW(self.network.parameters(), lr=cfg.lr)
+        self._model, self._optimizer = self._fabric.setup(self.network, self._optimizer)
+        if hasattr(self._model, 't_nnet') and hasattr(self._model.t_nnet, 'to'):
+            self._model.t_nnet.to(self._fabric.device)
 
     def run_selfplay(self):
-        cfg = self.config.training
         self.network.eval()
-        for idx in range(cfg.num_selfplay):
+        games = []
+        for idx in range(self.config.training.num_selfplay):
             game = Game(self.config, self.tasks, self.initial_positions)
             game = play_game(game, self.config.mcts, self.network)
             self.save_game(game)
+            games.append(game)
             tasks_done = game.last_info.get('tasks_done', 0)
-            print(f"  game {idx+1}/{cfg.num_selfplay}: "
+            print(f"  game {idx+1}/{self.config.training.num_selfplay}: "
                   f"{len(game.history)} steps, "
                   f"tasks_done={tasks_done}/{len(self.tasks)}")
         self.selfplay_iter += 1
+        return games
 
     def save_game(self, game):
         td_steps = self.config.training.td_steps
@@ -57,27 +73,20 @@ class AlphaAtomsTrainer:
         }, batch_size=len(game.history))
         self.replay_buffer.extend(observations)
 
-    def fit(self, logger=None):
+    def fit(self):
         cfg = self.config.training
         if self.network.use_fake:
             print("  (FakeNet: skipping training)")
-            return
+            return None
         if len(self.replay_buffer) < cfg.batch_size:
             print(f"  buffer too small ({len(self.replay_buffer)}), skipping training")
-            return
+            return None
 
-        loggers = [logger] if logger is not None else []
-        fabric = Fabric(accelerator=cfg.accelerator, devices=cfg.devices, loggers=loggers)
-        fabric.seed_everything(cfg.seed)
-        fabric.launch()
-
-        optimizer = torch.optim.AdamW(self.network.parameters(), lr=cfg.lr)
-        model, optimizer = fabric.setup(self.network, optimizer)
-
-        if hasattr(model, 't_nnet') and hasattr(model.t_nnet, 'to'):
-            model.t_nnet.to(fabric.device)
+        self._setup_fabric()
+        fabric, model, optimizer = self._fabric, self._model, self._optimizer
 
         model.train()
+        last_loss = None
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
@@ -88,14 +97,19 @@ class AlphaAtomsTrainer:
             optimizer.step()
             model.t_nnet.update(model.nnet.parameters())
             model._training_steps += 1
+            last_loss = loss.item()
 
             if (iteration + 1) % cfg.log_interval == 0:
-                if loggers:
-                    fabric.log_dict({"train/loss": loss.item()})
-                print(f"  step {iteration+1}/{cfg.training_steps}, "
-                      f"loss: {loss.item():.4f}")
+                print(f"  step {iteration+1}/{cfg.training_steps}, loss: {last_loss:.4f}")
 
         model.eval()
-        os.makedirs(cfg.save_dir, exist_ok=True)
-        state = {"model": model, "optimizer": optimizer}
-        fabric.save(os.path.join(cfg.save_dir, f"checkpoint_{self.selfplay_iter}.ckpt"), state)
+        return {'loss': last_loss}
+
+    def save_checkpoint(self, path):
+        if self.network.use_fake:
+            return
+        if self._fabric is not None:
+            state = {"model": self._model, "optimizer": self._optimizer}
+            self._fabric.save(path, state)
+        else:
+            torch.save({'model': self.network.state_dict()}, path)
