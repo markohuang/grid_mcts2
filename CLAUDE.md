@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Onboarding (read in order)
+
+1. **This file** — setup, commands, coding style, architecture overview
+2. **`docs/pipeline.md`** — training pipeline with diagrams (feature construction, network architecture, training targets)
+3. **`docs/architecture.md`** — detailed file structure, key interfaces, hyperparameter table, device lifecycle
+4. **`experiments/README.md`** → individual round docs — what's been tested, results, known bottlenecks, next steps
+
+### Current status
+
+Best cost on Map 0 (2x6, 9q): **13** (lower bound: 6). System works end-to-end. The main bottleneck is **policy entropy collapse** — the network converges to a near-deterministic policy within 5 epochs, limiting MCTS exploration. See `experiments/01_sanity_checks.md` for details and proposed fixes (policy target temperature, entropy bonus in loss, more self-play diversity).
+
 ## Setup
 
 Uses a uv-managed virtual environment. Always use `.venv/bin/python` (not system python).
@@ -102,6 +113,24 @@ Each run creates `outputs/<run_id>/` with:
 Early stopping: training halts if `best_cost` doesn't improve for `experiment.early_stopping_patience` epochs (only counts epochs with completed games).
 
 Total cost metric = reconfig parallel groups + gate execution groups (2x per layer for enter/exit).
+
+## Experiments
+
+Experiment logs live in `experiments/`. Each round is a standalone markdown with hypotheses, exact reproducible commands, results, and analysis. See `experiments/README.md` for the index.
+
+```bash
+# Run a prepared experiment script
+bash experiments.sh
+
+# Custom single run
+.venv/bin/python main.py --config.mcts.num_simulations=25 --config.training.epochs=15
+
+# Check results
+cat outputs/run_registry.jsonl
+cat outputs/<run_id>/metrics.jsonl
+```
+
+Outputs go to `outputs/<run_id>/`. Each run saves `config.json`, `metrics.jsonl`, checkpoints, and best solution JSON.
 
 ## Map definitions
 
