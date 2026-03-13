@@ -6,15 +6,14 @@ Workspace scratch pad. Checked items are done but kept for context.
 
 See `docs/alphadev_comparison.md` for full analysis.
 
-- [ ] **Fix bootstrap formula** — our correctness value target is `0.5*(td_return + bootstrap_value)` instead of standard `td_return + bootstrap_discount * bootstrap_value`. This halves the effective value targets. See `network.py:289-292`.
-- [ ] **Switch to two-hot encoding** — we use hard one-hot (`to_onehot` via `torch.bucketize`), AlphaDev uses two-hot interpolation (`scalar_to_two_hot`). Two-hot preserves gradient information between adjacent bins.
-- [ ] **Add reward weighting** — AlphaDev uses `correctness_reward_weight=2.0`, `latency_reward_weight=0.5`. We weight both heads equally in the combined value (`correctness_mean + latency_mean`). Need config params for these weights.
-- [ ] **Increase value resolution** — our 51 bins over [-25, 25] gives ~1.0 resolution per bin. AlphaDev uses 301 bins over [-3, 3] giving ~0.02 resolution. Our rewards are bounded by ±6, so we could tighten the range and/or increase bins.
+- [x] **Fix bootstrap formula** — was `0.5*(td_return + bootstrap_value)`, now standard `td_return + bootstrap_discount * bootstrap_value`
+- [x] **Switch to two-hot encoding** — `scalar_to_two_hot` with linear interpolation between adjacent bins, verified roundtrip accuracy
+- [x] **Add reward weighting** — `config.network.correctness_weight` and `latency_weight` (default 1.0). Applied in both inference (combined MCTS value) and loss
+- [x] **Increase value resolution** — 101 bins over [-10, 10] = ~0.2 per bin (was 51 bins over [-25, 25] = ~1.0 per bin)
 
 ## Critical: Cache observations during self-play
 
-- [ ] **Eliminate O(N²) make_observation in save_game** — currently, saving a game of N steps replays the env from scratch for every step index (and again for each bootstrap index). For a 24-step game this is ~600 env steps of pure waste. Fix: cache observations during `play_game` (store `obs` and `features` at each step of self-play), then `save_game` just stacks cached tensors. This is the single biggest CPU bottleneck after MCTS itself.
-- [ ] **Cache make_features too** — `make_features` is called during MCTS (for every simulation leaf) and again in `save_game`. The root observation features could be cached.
+- [x] **Eliminate O(N²) make_observation in save_game** — `game.cache_observation()` called in `play_game` at each step + terminal. `save_game` hits cache instead of replaying env. Verified N+1 cache entries for N-step games.
 
 ## Reward Shaping
 

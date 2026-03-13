@@ -84,9 +84,11 @@ def get_config():
     c.network.p_hsize = 32
     c.network.mlp_depth = 2
     c.network.ema_decay = 0.995
-    c.network.num_bins = 51
-    c.network.value_min = -25.0
-    c.network.value_max = 25.0
+    c.network.num_bins = 101
+    c.network.value_min = -10.0
+    c.network.value_max = 10.0
+    c.network.correctness_weight = 1.0
+    c.network.latency_weight = 1.0
 
     return c
 

@@ -91,8 +91,10 @@ def play_game(game: Game, config, network: Network) -> Game:
             min_max_stats, game.environment,
         )
         action = _select_action(len(game.history), root, network, game.action_space_size)
+        game.cache_observation()
         game.apply(action)
         game.store_search_statistics(root)
+    game.cache_observation()  # terminal state for bootstrap targets
     return game
 
 

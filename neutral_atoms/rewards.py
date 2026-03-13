@@ -88,12 +88,7 @@ def compute_conflict_count(
         gate_moves = gates_to_moves(tasks[layer_idx], sim_positions)
         if len(gate_moves) > 1:
             compat = is_parallel_executable_batch(gate_moves)
-            # count upper triangle of incompatible pairs
-            n = compat.shape[0]
-            for i in range(n):
-                for j in range(i + 1, n):
-                    if not compat[i, j]:
-                        total_conflicts += 1
+            total_conflicts += (~compat).triu(diagonal=1).sum().item()
     return total_conflicts
 
 def compute_manhattan_cost(

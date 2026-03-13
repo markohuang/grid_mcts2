@@ -259,15 +259,16 @@ class Network(nn.Module):
         correctness_logits, latency_logits, pi = output
         correctness_mean = self.logits2values(correctness_logits)
         latency_mean = self.logits2values(latency_logits)
+        cw, lw = self.cfg.correctness_weight, self.cfg.latency_weight
         if aslist:
             return NetworkOutput(
-                value=(correctness_mean + latency_mean).item(),
+                value=(cw * correctness_mean + lw * latency_mean).item(),
                 correctness_value_logits=correctness_logits.squeeze(),
                 latency_value_logits=latency_logits.squeeze(),
                 policy_logits=pi.squeeze().tolist(),
             )
         return NetworkOutput(
-            value=correctness_mean + latency_mean,
+            value=cw * correctness_mean + lw * latency_mean,
             correctness_value_logits=correctness_logits,
             latency_value_logits=latency_logits,
             policy_logits=pi,
@@ -287,20 +288,20 @@ class Network(nn.Module):
             bootstrap_predictions.correctness_value_logits
         )
         target_correctness = (
-            (1 - bootstrap_discount) * target_correctness
-            + 0.5 * bootstrap_discount * (target_correctness + bootstrap_cv)
+            target_correctness + bootstrap_discount * bootstrap_cv
         ).clip(self.cfg.value_min, self.cfg.value_max)
 
         policy_loss = F.cross_entropy(predictions.policy_logits, target_policy)
         correctness_loss = F.cross_entropy(
             predictions.correctness_value_logits,
-            self.to_onehot(target_correctness)
+            self.scalar_to_two_hot(target_correctness)
         )
         latency_loss = F.cross_entropy(
             predictions.latency_value_logits,
-            self.to_onehot(target_latency)
+            self.scalar_to_two_hot(target_latency)
         )
-        total = (policy_loss + correctness_loss + latency_loss).mean()
+        cw, lw = self.cfg.correctness_weight, self.cfg.latency_weight
+        total = (policy_loss + cw * correctness_loss + lw * latency_loss).mean()
 
         if policy_entropy_weight > 0:
             pi_probs = torch.exp(predictions.policy_logits)
@@ -317,12 +318,17 @@ class Network(nn.Module):
     def logits2values(self, logits):
         return (torch.exp(logits) @ self.categories).squeeze(-1)
 
-    def to_onehot(self, val):
-        buckets = self.categories.squeeze()
-        return F.one_hot(
-            torch.bucketize(val, buckets).clamp(0, self.cfg.num_bins - 1),
-            num_classes=self.cfg.num_bins
-        ).float()
+    def scalar_to_two_hot(self, val):
+        bins = self.categories.squeeze()
+        val = val.clamp(bins[0], bins[-1])
+        idx_below = torch.bucketize(val, bins, right=True).clamp(1, len(bins) - 1) - 1
+        idx_above = idx_below + 1
+        weight_above = (val - bins[idx_below]) / (bins[idx_above] - bins[idx_below])
+        weight_below = 1.0 - weight_above
+        two_hot = torch.zeros(*val.shape, self.cfg.num_bins, device=val.device)
+        two_hot.scatter_(-1, idx_below.unsqueeze(-1), weight_below.unsqueeze(-1))
+        two_hot.scatter_(-1, idx_above.unsqueeze(-1), weight_above.unsqueeze(-1))
+        return two_hot
 
     def training_steps(self) -> int:
         return self._training_steps

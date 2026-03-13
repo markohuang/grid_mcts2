@@ -1,5 +1,5 @@
 import torch
-from .types import Tasks, StepResult, GATE_ACTION, EMPTY_CELL, to_json
+from .types import StepResult, GATE_ACTION, EMPTY_CELL, to_json
 from .board import create_board, apply_move, action_to_move, get_legal_actions
 from .tasks import is_episode_done
 from .rewards import compute_total_cost, compute_reward, compute_cost_bounds, REWARD_COST_FN
@@ -13,7 +13,7 @@ class NeutralAtomsEnv:
         self.num_qubits = config.num_qubits
         self.num_tasks = len(tasks)
         self.cost_lb, self.cost_ub = compute_cost_bounds(tasks)
-        self.reward_mode = getattr(config, 'reward_mode', 'cost_delta')
+        self.reward_mode = config.reward_mode
         self.reset()
     
     def reset(self) -> dict:
@@ -37,7 +37,7 @@ class NeutralAtomsEnv:
         )
 
     def step(self, action: int) -> StepResult:
-        prev_cost, prev_entropy = self._cached_cost, self._cached_entropy
+        prev_entropy = self._cached_entropy
         prev_reward_cost = self._cached_reward_cost
 
         if action == GATE_ACTION:

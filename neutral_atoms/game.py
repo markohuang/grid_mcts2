@@ -30,6 +30,7 @@ class Game:
         self.done = False
         self.last_info = {}
         self.latency_reward = 0.0
+        self.observation_cache = []
 
     def terminal(self):
         return self.done or not self.environment.legal_actions()
@@ -65,14 +66,20 @@ class Game:
             ])
         self.root_values.append(root.value())
 
+    def cache_observation(self):
+        obs = self.environment._get_observation()
+        self.observation_cache.append(make_features(obs, self.tasks))
+
     def make_observation(self, state_index):
         if state_index == -1:
             obs = self.environment._get_observation()
-        else:
-            env = NeutralAtomsEnv(self.tasks, self.initial_positions, self.env_config)
-            obs = env.reset()
-            for action in self.history[:state_index]:
-                obs = env.step(action).observation
+            return {'features': make_features(obs, self.tasks)}
+        if state_index < len(self.observation_cache):
+            return {'features': self.observation_cache[state_index]}
+        env = NeutralAtomsEnv(self.tasks, self.initial_positions, self.env_config)
+        obs = env.reset()
+        for action in self.history[:state_index]:
+            obs = env.step(action).observation
         return {'features': make_features(obs, self.tasks)}
 
     def make_target(self, state_index, td_steps, to_play):
