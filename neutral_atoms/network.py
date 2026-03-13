@@ -273,7 +273,7 @@ class Network(nn.Module):
             policy_logits=pi,
         )
 
-    def forward(self, batch):
+    def forward(self, batch, policy_entropy_weight=0.0):
         predictions = self.inference(batch['obs'])
         with self.t_nnet.average_parameters(), torch.no_grad():
             bootstrap_predictions = self.inference(batch['bootstrap_obs'])
@@ -301,6 +301,12 @@ class Network(nn.Module):
             self.to_onehot(target_latency)
         )
         total = (policy_loss + correctness_loss + latency_loss).mean()
+
+        if policy_entropy_weight > 0:
+            pi_probs = torch.exp(predictions.policy_logits)
+            entropy = -(pi_probs * predictions.policy_logits).sum(dim=-1).mean()
+            total = total - policy_entropy_weight * entropy
+
         return {
             'total': total,
             'policy': policy_loss.mean().item(),

@@ -45,6 +45,7 @@ def get_config():
     c.env.budget = 24
     c.env.entropy_weight = 0.0
     c.env.reward_scale = 1.0
+    c.env.reward_mode = 'cost_delta'
 
     c.mcts = ml_collections.ConfigDict()
     c.mcts.num_simulations = 50
@@ -66,9 +67,12 @@ def get_config():
     c.training.training_steps = 200
     c.training.grad_norm_clip = 1.0
     c.training.log_interval = 200
-    c.training.accelerator = 'cpu'
+    c.training.accelerator = 'auto'
     c.training.devices = 1
     c.training.seed = 12315
+    c.training.policy_entropy_weight = 0.0
+    c.training.policy_target_temperature = 1.0
+    c.training.num_parallel_games = 1
 
     c.experiment = ml_collections.ConfigDict()
     c.experiment.output_dir = './outputs'

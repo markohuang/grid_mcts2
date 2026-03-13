@@ -108,6 +108,41 @@ def save_solution(game, path):
     return solution
 
 
+def log_game_trace(game, run_dir, label='best'):
+    env = NeutralAtomsEnv(game.tasks, game.initial_positions, game.env_config)
+    env.reset()
+    board_shape = (game.env_config.board_height, game.env_config.board_width)
+    board_size = board_shape[0] * board_shape[1]
+    trace = []
+    for step_idx, action in enumerate(game.history):
+        cost_before = env._cached_cost
+        entry = {'step': step_idx, 'action': action}
+        if action == GATE_ACTION:
+            entry['action_type'] = 'gate'
+            entry['tasks_done_before'] = env.tasks_done
+            result = env.step(action)
+            entry['atom_positions'] = env.atom_positions.tolist()
+        else:
+            q = (action - 1) // board_size
+            src = env.atom_positions[q].tolist()
+            move = action_to_move(action, env.atom_positions, board_shape)
+            result = env.step(action)
+            dst = env.atom_positions[q].tolist()
+            entry['action_type'] = 'move'
+            entry['qubit'] = q
+            entry['src'] = src
+            entry['dst'] = dst
+        entry['cost_before'] = cost_before
+        entry['cost_after'] = env._cached_cost
+        entry['reward'] = result.reward
+        entry['tasks_done'] = env.tasks_done
+        trace.append(entry)
+    path = os.path.join(run_dir, 'solutions', f'{label}_trace.json')
+    with open(path, 'w') as f:
+        json.dump(trace, f, indent=2)
+    return trace
+
+
 def selfplay_metrics(games, num_tasks):
     completed = [g for g in games if g.last_info.get('tasks_done', 0) >= num_tasks]
     metrics = {

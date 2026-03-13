@@ -10,23 +10,24 @@ Run outputs live in `outputs/<run_id>/` with per-epoch `metrics.jsonl` and `conf
 | Round | Date | Focus | Key finding |
 |-------|------|-------|-------------|
 | [01](01_sanity_checks.md) | 2026-03-12 | Baseline sanity checks | MCTS + learning both work; policy entropy collapses to 0 prematurely |
+| [02](02_entropy_collapse.md) | 2026-03-12 | Entropy collapse fixes on Map 1 | Target temp and entropy bonus don't solve the real issue — the "execute immediately" attractor |
 
 ## Known bottlenecks
 
-1. **Policy entropy collapse** — the network converges to a near-deterministic policy within 5 epochs across all learning runs. Root cause: few simulations produce peaked visit count distributions → peaked training targets → peaked policy → even more peaked visits (positive feedback loop). Only Dirichlet noise at root provides residual diversity.
+1. **"Execute immediately" attractor.** On all maps tested, the network converges to the trivial strategy of just executing gate layers without reconfiguration (avg_steps=3.0, cost=18 on Map 1). Reconfig moves have zero/negative immediate reward, so the network never learns that they can reduce future gate parallelism cost. This is a multi-step credit assignment problem.
+
+2. **Policy entropy collapse** (secondary to #1). The network converges to a near-deterministic policy within 5-10 epochs. Policy target temperature (τ=4.0) can keep entropy alive but doesn't improve costs — the policy explores but still converges to "just execute." Entropy bonus (β≤0.05) is too weak to fight peaked training targets.
 
 ## Proposed next experiments (not yet run)
 
-These address the entropy collapse bottleneck:
-
-1. **Policy target temperature** — apply temperature to MCTS visit count distribution before using as training target: `softmax(log(visits) / τ)`. Directly breaks the feedback loop.
-2. **Entropy bonus in policy loss** — add `- β * H(π)` to penalize low-entropy policies. Range to test: β = 0.01 to 0.1.
-3. **More self-play games per epoch** — current default is 5 games/epoch. More games = more diverse replay buffer = slower policy convergence.
-
-These are orthogonal and composable. Test individually first, then combine winners.
+1. **More MCTS simulations** — 25 sims may be too few for 129-action space. Try 50-100 sims.
+2. **Reward shaping for reconfig** — positive reward for moves that reduce future gate cost.
+3. **Curriculum learning** — start with 1 task layer, then increase.
+4. **Investigate cost=13 solution** — understand what reconfiguration was found to inform approach.
 
 ## Best results so far
 
 | Map | Best cost | Lower bound | Config | Run ID |
 |-----|-----------|-------------|--------|--------|
 | 0 (2x6, 9q) | 13 | 6 | high explore (α=0.3, frac=0.5), 10 sims, 15 epochs | 55f9f5d5 |
+| 1 (4x4, 8q) | 13 | 6 | high explore, 25 sims, 20 epochs (lucky early find) | 8d77b799 |

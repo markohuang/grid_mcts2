@@ -1,3 +1,4 @@
+import math
 from typing import NamedTuple, Sequence
 
 from .env import NeutralAtomsEnv
@@ -25,6 +26,7 @@ class Game:
         self.root_values = []
         self.action_space_size = config.network.num_actions
         self.discount = config.mcts.discount
+        self.policy_target_temperature = config.training.policy_target_temperature
         self.done = False
         self.last_info = {}
         self.latency_reward = 0.0
@@ -45,11 +47,22 @@ class Game:
             self.latency_reward = -result.info.get('cost', 0.0)
 
     def store_search_statistics(self, root):
-        sum_visits = sum(child.visit_count for child in root.children.values())
-        self.child_visits.append([
-            root.children[a].visit_count / sum_visits if a in root.children else 0
-            for a in range(self.action_space_size)
-        ])
+        tau = self.policy_target_temperature
+        if tau == 1.0:
+            sum_visits = sum(child.visit_count for child in root.children.values())
+            self.child_visits.append([
+                root.children[a].visit_count / sum_visits if a in root.children else 0
+                for a in range(self.action_space_size)
+            ])
+        else:
+            log_visits = {a: math.log(child.visit_count + 1e-8) / tau
+                          for a, child in root.children.items()}
+            max_log = max(log_visits.values())
+            exp_visits = {a: math.exp(v - max_log) for a, v in log_visits.items()}
+            exp_sum = sum(exp_visits.values())
+            self.child_visits.append([
+                exp_visits.get(a, 0) / exp_sum for a in range(self.action_space_size)
+            ])
         self.root_values.append(root.value())
 
     def make_observation(self, state_index):

@@ -2,7 +2,7 @@ import torch
 from .types import Tasks, StepResult, GATE_ACTION, EMPTY_CELL, to_json
 from .board import create_board, apply_move, action_to_move, get_legal_actions
 from .tasks import is_episode_done
-from .rewards import compute_total_cost, compute_reward, compute_cost_bounds
+from .rewards import compute_total_cost, compute_reward, compute_cost_bounds, REWARD_COST_FN
 
 class NeutralAtomsEnv:
     def __init__(self, tasks, initial_positions, config):
@@ -13,6 +13,7 @@ class NeutralAtomsEnv:
         self.num_qubits = config.num_qubits
         self.num_tasks = len(tasks)
         self.cost_lb, self.cost_ub = compute_cost_bounds(tasks)
+        self.reward_mode = getattr(config, 'reward_mode', 'cost_delta')
         self.reset()
     
     def reset(self) -> dict:
@@ -25,11 +26,20 @@ class NeutralAtomsEnv:
         self._cached_cost, self._cached_entropy = compute_total_cost(
             self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
         )
+        self._cached_reward_cost = self._compute_reward_cost()
         return self._get_observation()
     
+    def _compute_reward_cost(self):
+        if self.reward_mode == 'cost_delta':
+            return self._cached_cost
+        return REWARD_COST_FN[self.reward_mode](
+            self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
+        )
+
     def step(self, action: int) -> StepResult:
         prev_cost, prev_entropy = self._cached_cost, self._cached_entropy
-        
+        prev_reward_cost = self._cached_reward_cost
+
         if action == GATE_ACTION:
             self.tasks_done += 1
             self.current_phase_moves = []
@@ -37,14 +47,15 @@ class NeutralAtomsEnv:
             move = action_to_move(action, self.atom_positions, self.board_shape)
             self.board, self.atom_positions = apply_move(self.board, self.atom_positions, move)
             self.current_phase_moves.append(move)
-        
+
         self.actions.append(action)
         self._cached_cost, self._cached_entropy = compute_total_cost(
             self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
         )
-        
+        self._cached_reward_cost = self._compute_reward_cost()
+
         reward = compute_reward(
-            prev_cost, self._cached_cost, prev_entropy, self._cached_entropy,
+            prev_reward_cost, self._cached_reward_cost, prev_entropy, self._cached_entropy,
             self.config.entropy_weight, self.config.reward_scale
         )
         done = is_episode_done(self.tasks_done, self.num_tasks) or len(self.actions) >= self.config.budget
@@ -83,6 +94,7 @@ class NeutralAtomsEnv:
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
         new_env._cached_cost = self._cached_cost
         new_env._cached_entropy = self._cached_entropy
+        new_env._cached_reward_cost = self._cached_reward_cost
         return new_env
     
     def state_hash(self) -> int:

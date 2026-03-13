@@ -1,10 +1,26 @@
 import torch
+import concurrent.futures
 from lightning import Fabric
 from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 
 from .game import Game
 from .mcts import play_game
+from .network import Network
+
+
+def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake):
+    torch.set_num_threads(1)
+    import ml_collections
+    config = ml_collections.ConfigDict(config_dict)
+    network_config = ml_collections.ConfigDict(network_config_dict)
+    net = Network(network_config, use_fake=use_fake)
+    if not use_fake:
+        net.load_state_dict(state_dict)
+    net.eval()
+    game = Game(config, tasks, initial_positions)
+    game = play_game(game, config.mcts, net)
+    return game
 
 
 class AlphaAtomsTrainer:
@@ -21,6 +37,7 @@ class AlphaAtomsTrainer:
         self._fabric = None
         self._model = None
         self._optimizer = None
+        self._pool = None
 
     def _setup_fabric(self):
         if self._fabric is not None:
@@ -34,19 +51,65 @@ class AlphaAtomsTrainer:
         if hasattr(self._model, 't_nnet') and hasattr(self._model.t_nnet, 'to'):
             self._model.t_nnet.to(self._fabric.device)
 
+    def _get_pool(self, num_workers):
+        if self._pool is None:
+            ctx = torch.multiprocessing.get_context('forkserver')
+            self._pool = concurrent.futures.ProcessPoolExecutor(
+                max_workers=num_workers, mp_context=ctx
+            )
+        return self._pool
+
     def run_selfplay(self):
         self.network.eval()
+        num_games = self.config.training.num_selfplay
+        num_parallel = self.config.training.num_parallel_games
+
+        if num_parallel > 1:
+            games = self._run_parallel_selfplay(num_games, num_parallel)
+        else:
+            games = self._run_sequential_selfplay(num_games)
+
+        self.selfplay_iter += 1
+        return games
+
+    def _run_sequential_selfplay(self, num_games):
+        prev_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
         games = []
-        for idx in range(self.config.training.num_selfplay):
+        for idx in range(num_games):
             game = Game(self.config, self.tasks, self.initial_positions)
             game = play_game(game, self.config.mcts, self.network)
             self.save_game(game)
             games.append(game)
             tasks_done = game.last_info.get('tasks_done', 0)
-            print(f"  game {idx+1}/{self.config.training.num_selfplay}: "
+            print(f"  game {idx+1}/{num_games}: "
                   f"{len(game.history)} steps, "
                   f"tasks_done={tasks_done}/{len(self.tasks)}")
-        self.selfplay_iter += 1
+        torch.set_num_threads(prev_threads)
+        return games
+
+    def _run_parallel_selfplay(self, num_games, num_parallel):
+        state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
+        config_dict = self.config.to_dict()
+        network_config_dict = self.config.network.to_dict()
+        use_fake = self.network.use_fake
+
+        pool = self._get_pool(num_parallel)
+        futures = [
+            pool.submit(_play_single_game, state_dict, config_dict, self.tasks,
+                        self.initial_positions, network_config_dict, use_fake)
+            for _ in range(num_games)
+        ]
+
+        games = []
+        for idx, future in enumerate(futures):
+            game = future.result()
+            self.save_game(game)
+            games.append(game)
+            tasks_done = game.last_info.get('tasks_done', 0)
+            print(f"  game {idx+1}/{num_games}: "
+                  f"{len(game.history)} steps, "
+                  f"tasks_done={tasks_done}/{len(self.tasks)}")
         return games
 
     def save_game(self, game):
@@ -90,7 +153,7 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
-            losses = model(batch)
+            losses = model(batch, policy_entropy_weight=cfg.policy_entropy_weight)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
             fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)

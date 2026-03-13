@@ -6,7 +6,7 @@ from neutral_atoms.config import get_config, MAPS, atom_map_to_positions, set_de
 from neutral_atoms.network import Network
 from neutral_atoms.trainer import AlphaAtomsTrainer
 from neutral_atoms.experiment import (
-    create_run_dir, selfplay_metrics, save_solution,
+    create_run_dir, selfplay_metrics, save_solution, log_game_trace,
     append_epoch_metrics, append_to_registry,
 )
 
@@ -100,6 +100,7 @@ def main(_):
 
     if best_game is not None:
         save_solution(best_game, os.path.join(run_dir, 'solutions', 'best.json'))
+        log_game_trace(best_game, run_dir, label='best')
         print(f"\nBest solution cost: {best_cost}")
 
     run_metrics.update({

@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Current status
 
-Best cost on Map 0 (2x6, 9q): **13** (lower bound: 6). System works end-to-end. The main bottleneck is **policy entropy collapse** — the network converges to a near-deterministic policy within 5 epochs, limiting MCTS exploration. See `experiments/01_sanity_checks.md` for details and proposed fixes (policy target temperature, entropy bonus in loss, more self-play diversity).
+Best costs: Map 0 = **13**, Map 1 = **13** (lower bound: 6 for both). System works end-to-end. The main bottleneck is the **"execute immediately" attractor** — the network converges to the trivial strategy of executing gate layers without reconfiguration. Policy entropy collapse (Round 01) is a symptom; the root cause is that reconfig moves have no immediate reward, making multi-step planning a credit assignment problem. Target temperature and entropy bonus (Round 02) keep entropy alive but don't improve costs. See `experiments/README.md` for proposed next steps.
 
 ## Setup
 
@@ -62,7 +62,7 @@ This is an AlphaZero-style MCTS training system for neutral atom quantum computi
 
 Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **train** (gradient steps on sampled batches) → **checkpoint/early-stop**.
 
-- `run_selfplay()` returns a list of `Game` objects (also saves to replay buffer internally).
+- `run_selfplay()` returns a list of `Game` objects (also saves to replay buffer internally). Supports parallel self-play via `config.training.num_parallel_games` (uses `torch.multiprocessing.Pool`; each worker creates a fresh Network from state_dict).
 - `fit()` returns `{'loss': float}` or `None` (FakeNet / buffer too small).
 - `save_checkpoint(path)` saves model + optimizer via Fabric.
 - `trainer.py` uses **Lightning Fabric** for device management (CPU/GPU) and **torchrl's `TensorDictReplayBuffer`** for experience storage.
@@ -71,10 +71,11 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 ### Device lifecycle
 
 1. Network starts on CPU. First `fit()` call sets up Fabric once via `_setup_fabric()` and moves model to GPU.
-2. Fabric, wrapped model, and optimizer persist as trainer state across epochs.
-3. During self-play, `Network.inference()` moves CPU observations to the model's device automatically.
-4. EMA shadow parameters synced to device via `EMA.to(device)` after `fabric.setup()`.
-5. Environment always runs on CPU — this is correct and intentional.
+2. Fabric accelerator defaults to `'auto'` — picks GPU when available, falls back to CPU.
+3. Fabric, wrapped model, and optimizer persist as trainer state across epochs.
+4. During self-play, `Network.inference()` moves CPU observations to the model's device automatically.
+5. EMA shadow parameters synced to device via `EMA.to(device)` after `fabric.setup()`.
+6. Environment always runs on CPU — this is correct and intentional.
 
 ### Network (`network.py`)
 
@@ -88,6 +89,7 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 
 - Actions: `0` = execute gate layer, `1+` = move qubit q to cell p (encoded as `1 + q * board_size + p`).
 - Reward is dense: every step compares cost-before vs cost-after of executing all remaining gates, so moves that improve future parallelism are immediately rewarded.
+- Reward modes (`config.env.reward_mode`): `cost_delta` (default, full cost including reconfig groups), `gate_only` (only gate parallelism cost — reconfig is free), `conflict_count` (pairwise gate-move conflicts), `manhattan` (sum of Manhattan distances between gate partners). The real total cost (`_cached_cost`) is always tracked for metrics regardless of reward mode.
 - Parallel grouping uses the AOD constraint: two atom moves can execute simultaneously only if they don't cross in rows or columns. Implemented as vectorized pairwise compatibility check + greedy graph coloring.
 
 ### MCTS (`mcts.py`)
@@ -107,6 +109,7 @@ Each run creates `outputs/<run_id>/` with:
 - `config.json` — frozen ConfigDict snapshot
 - `checkpoints/` — periodic + final model checkpoints (Lightning Fabric)
 - `solutions/best.json` — atom-viz compatible JSON (board, circuit, plan)
+- `solutions/best_trace.json` — per-step trace with action type, qubit/src/dst, cost before/after, reward
 
 `outputs/run_registry.jsonl` tracks all completed runs with config + metrics.
 

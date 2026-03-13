@@ -1,7 +1,7 @@
 import torch
 import math
 from .types import Board, AtomPositions, Tasks
-from .moves import count_groups, group_sizes
+from .moves import count_groups, group_sizes, is_parallel_executable_batch
 from .tasks import gates_to_moves
 from .board import apply_moves_batch
 
@@ -31,7 +31,7 @@ def compute_total_cost(
     entropy_count = 0
     sim_board = board.clone()
     sim_positions = atom_positions.clone()
-    
+
     for layer_idx in range(tasks_done, len(tasks)):
         # reconfig cost (only current layer has planned moves)
         if layer_idx == tasks_done and len(current_phase_moves) > 0:
@@ -48,9 +48,78 @@ def compute_total_cost(
             sizes = group_sizes(gate_moves, canonicalize=True)
             total_entropy += compute_normalized_entropy(sizes, len(gate_moves))
             entropy_count += 1
-    
+
     avg_entropy = total_entropy / entropy_count if entropy_count > 0 else 0.0
     return total_groups, avg_entropy
+
+def compute_gate_only_cost(
+    board: Board,
+    atom_positions: AtomPositions,
+    tasks: Tasks,
+    tasks_done: int,
+    current_phase_moves: list,
+) -> int:
+    sim_board = board.clone()
+    sim_positions = atom_positions.clone()
+    total_groups = 0
+    for layer_idx in range(tasks_done, len(tasks)):
+        if layer_idx == tasks_done and len(current_phase_moves) > 0:
+            reconfig_moves = torch.stack(current_phase_moves)
+            sim_board, sim_positions = apply_moves_batch(sim_board, sim_positions, reconfig_moves)
+        gate_moves = gates_to_moves(tasks[layer_idx], sim_positions)
+        if len(gate_moves) > 0:
+            total_groups += 2 * count_groups(gate_moves, canonicalize=True)
+    return total_groups
+
+def compute_conflict_count(
+    board: Board,
+    atom_positions: AtomPositions,
+    tasks: Tasks,
+    tasks_done: int,
+    current_phase_moves: list,
+) -> int:
+    sim_board = board.clone()
+    sim_positions = atom_positions.clone()
+    total_conflicts = 0
+    for layer_idx in range(tasks_done, len(tasks)):
+        if layer_idx == tasks_done and len(current_phase_moves) > 0:
+            reconfig_moves = torch.stack(current_phase_moves)
+            sim_board, sim_positions = apply_moves_batch(sim_board, sim_positions, reconfig_moves)
+        gate_moves = gates_to_moves(tasks[layer_idx], sim_positions)
+        if len(gate_moves) > 1:
+            compat = is_parallel_executable_batch(gate_moves)
+            # count upper triangle of incompatible pairs
+            n = compat.shape[0]
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if not compat[i, j]:
+                        total_conflicts += 1
+    return total_conflicts
+
+def compute_manhattan_cost(
+    board: Board,
+    atom_positions: AtomPositions,
+    tasks: Tasks,
+    tasks_done: int,
+    current_phase_moves: list,
+) -> int:
+    sim_board = board.clone()
+    sim_positions = atom_positions.clone()
+    total_dist = 0
+    for layer_idx in range(tasks_done, len(tasks)):
+        if layer_idx == tasks_done and len(current_phase_moves) > 0:
+            reconfig_moves = torch.stack(current_phase_moves)
+            sim_board, sim_positions = apply_moves_batch(sim_board, sim_positions, reconfig_moves)
+        for q1, q2 in tasks[layer_idx]:
+            p1, p2 = sim_positions[q1], sim_positions[q2]
+            total_dist += abs(p1[0] - p2[0]).item() + abs(p1[1] - p2[1]).item()
+    return total_dist
+
+REWARD_COST_FN = {
+    'gate_only': compute_gate_only_cost,
+    'conflict_count': compute_conflict_count,
+    'manhattan': compute_manhattan_cost,
+}
 
 def compute_reward(
     prev_cost: int, curr_cost: int,
