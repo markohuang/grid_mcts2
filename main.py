@@ -1,4 +1,5 @@
 import os
+import time
 from absl import app
 from ml_collections import config_flags
 
@@ -16,10 +17,13 @@ _CONFIG = config_flags.DEFINE_config_dict('config', get_config())
 def print_config_summary(config, network):
     print(f"Map {config.map_num}: {config.env.board_height}x{config.env.board_width}, "
           f"{config.env.num_qubits} qubits, {config.network.num_tasks} tasks")
-    print(f"Action space: {config.network.num_actions}, Use fake: {config.use_fake}")
+    print(f"Action space: {config.network.num_actions}, Use fake: {config.use_fake}, "
+          f"Reward: {config.env.reward_mode}")
     if not config.use_fake:
         n_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
-        print(f"Trainable params: {n_params}")
+        print(f"Trainable params: {n_params}, "
+              f"Sims: {config.mcts.num_simulations}, "
+              f"Parallel: {config.training.num_parallel_games}")
 
 
 def format_selfplay_summary(sp_metrics):
@@ -32,6 +36,8 @@ def format_selfplay_summary(sp_metrics):
         parts.append(f"root_val={sp_metrics['avg_root_value']:.2f}")
     if 'avg_policy_entropy' in sp_metrics:
         parts.append(f"pi_entropy={sp_metrics['avg_policy_entropy']:.2f}")
+    if 'gate_action_fraction' in sp_metrics:
+        parts.append(f"gate_frac={sp_metrics['gate_action_fraction']:.2f}")
     return ', '.join(parts)
 
 
@@ -60,9 +66,11 @@ def main(_):
         print(f"\n=== Epoch {epochs_completed}/{config.training.epochs} ===")
 
         print("Self-play:")
+        t0 = time.time()
         games = trainer.run_selfplay()
+        selfplay_time = time.time() - t0
         sp_metrics = selfplay_metrics(games, len(tasks))
-        print(f"  >> {format_selfplay_summary(sp_metrics)}")
+        print(f"  >> {format_selfplay_summary(sp_metrics)} [{selfplay_time:.1f}s]")
 
         if 'best_cost' in sp_metrics:
             if sp_metrics['best_cost'] < best_cost:
@@ -73,11 +81,14 @@ def main(_):
                 no_improve_count += 1
 
         print("Training:")
+        t0 = time.time()
         train_result = trainer.fit()
+        train_time = time.time() - t0
 
-        # Log epoch metrics
         epoch_metrics = {
             'epoch': epochs_completed,
+            'selfplay_time': round(selfplay_time, 2),
+            'train_time': round(train_time, 2),
             **{k: v for k, v in sp_metrics.items() if k != 'best_game'},
             'best_cost_so_far': best_cost if best_cost < float('inf') else None,
         }

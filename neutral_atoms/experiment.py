@@ -167,6 +167,11 @@ def selfplay_metrics(games, num_tasks):
                 all_entropies.append(-sum(p * math.log(p) for p in probs))
     if all_entropies:
         metrics['avg_policy_entropy'] = sum(all_entropies) / len(all_entropies)
+    # Action type distribution
+    all_actions = [a for g in games for a in g.history]
+    if all_actions:
+        gate_count = sum(1 for a in all_actions if a == GATE_ACTION)
+        metrics['gate_action_fraction'] = gate_count / len(all_actions)
     return metrics
 
 
@@ -187,6 +192,10 @@ def append_to_registry(output_dir, run_id, config, metrics):
         'batch_size': config.training.batch_size,
         'training_steps': config.training.training_steps,
         'num_selfplay': config.training.num_selfplay,
+        'reward_mode': config.env.reward_mode,
+        'num_parallel_games': config.training.num_parallel_games,
+        'correctness_weight': config.network.correctness_weight,
+        'latency_weight': config.network.latency_weight,
     }
     entry.update({k: v for k, v in metrics.items() if k != 'best_game'})
     registry_path = os.path.join(output_dir, 'run_registry.jsonl')
