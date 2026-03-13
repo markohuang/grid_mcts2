@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -15,7 +16,7 @@ def make_features(observation: dict, tasks: list) -> torch.Tensor:
     """Convert raw env observation to network features.
 
     Returns: (num_tasks+1, board_size, num_qubits) tensor.
-    Slot 0 is the raw board state (blank reference).
+    Slot 0 is the raw board state with current qubit marker.
     Slots 1..num_tasks encode board state + gate pair indicators for each task layer.
     """
     board_onehot = observation['board_onehot']  # (board_size, num_qubits+1)
@@ -23,7 +24,7 @@ def make_features(observation: dict, tasks: list) -> torch.Tensor:
     tasks_done = observation['tasks_done']
     num_tasks = len(tasks)
 
-    features = [board_feat.clone()]  # slot 0: blank reference
+    features = [board_feat.clone()]  # slot 0: raw board state
     for t in range(num_tasks):
         feat = board_feat.clone()
         if t >= tasks_done:
@@ -121,7 +122,7 @@ def MLPMixer(*, image_size, channels, patch_size, dim, depth,
 class FakeNet:
     def __init__(self, cfg):
         self.num_bins = cfg.num_bins
-        self.num_actions = cfg.num_actions
+        self.num_actions = cfg.num_actions  # board_size
 
     def __call__(self, *args, **kwargs):
         val = torch.ones(1, self.num_bins)
@@ -147,6 +148,18 @@ class FakeNet:
         pass
 
 
+# ---- Qubit Identity Embedding ----
+
+def make_qubit_embedding(num_qubits: int, dim: int) -> torch.Tensor:
+    pe = torch.zeros(num_qubits, dim)
+    position = torch.arange(num_qubits, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2, dtype=torch.float) * -(math.log(10000.0) / dim))
+    pe[:, 0::2] = torch.sin(position * div_term)
+    if dim > 1:
+        pe[:, 1::2] = torch.cos(position * div_term[:dim // 2])
+    return pe
+
+
 # ---- Value & Policy Networks ----
 
 class ValueNetwork(nn.Module):
@@ -159,27 +172,26 @@ class ValueNetwork(nn.Module):
             channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.v_hsize,
             image_size=(self.nqubits, 1), patch_size=1
         )
+        self.register_buffer('qubit_emb', make_qubit_embedding(self.nqubits, cfg.v_hsize))
         self.mixer2 = MLPMixer(
             channels=self.nqubits * cfg.v_hsize, depth=cfg.mlp_depth,
             dim=cfg.v_hsize, image_size=(self.ntasks, 1), patch_size=1
         )
         self.W_correctness = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
         self.W_latency = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
-        self.W_gate_action = nn.Linear(self.ntasks * cfg.v_hsize, 1)
-        for w in [self.W_correctness, self.W_latency, self.W_gate_action]:
+        for w in [self.W_correctness, self.W_latency]:
             w.weight.data /= 100
             w.bias.data /= 100
-        self.softplus = nn.Softplus()
 
     def forward(self, grids):
         bs, ntasks = grids.shape[:2]
-        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))
+        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))  # (bs*ntasks, nqubits, v_hsize)
+        x = x + self.qubit_emb  # inject qubit identity
         x = self.mixer2(
             x.reshape(bs, ntasks, -1).permute(0, 2, 1).unsqueeze(-1)
         )
         flat = x.flatten(1)
-        return (self.W_correctness(flat), self.W_latency(flat),
-                self.softplus(self.W_gate_action(flat)))
+        return self.W_correctness(flat), self.W_latency(flat)
 
 
 class PolicyNetwork(nn.Module):
@@ -192,6 +204,7 @@ class PolicyNetwork(nn.Module):
             channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.p_hsize,
             image_size=(self.nqubits, 1), patch_size=1
         )
+        self.register_buffer('qubit_emb', make_qubit_embedding(self.nqubits, cfg.p_hsize))
         self.mixer2 = MLPMixer(
             channels=self.ntasks * cfg.p_hsize, depth=cfg.mlp_depth,
             dim=cfg.p_hsize, image_size=(self.nqubits, 1), patch_size=1
@@ -203,14 +216,16 @@ class PolicyNetwork(nn.Module):
 
     def forward(self, grids):
         bs, ntasks = grids.shape[:2]
-        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))
+        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))  # (bs*ntasks, nqubits, p_hsize)
+        x = x + self.qubit_emb  # inject qubit identity
         _, nqubits, dim = x.shape
         x = self.mixer2(
             x.reshape(bs, ntasks, nqubits, dim, 1)
              .permute(0, 1, 3, 2, 4)
              .flatten(1, 2)
         )
-        return self.softplus(self.W_pi(x).squeeze(-1))
+        # x: (bs, nqubits, p_hsize) — per-qubit policy logits
+        return self.softplus(self.W_pi(x))  # (bs, nqubits, board_size)
 
 
 class NeutralAtomsMLP2(nn.Module):
@@ -219,13 +234,20 @@ class NeutralAtomsMLP2(nn.Module):
         self.value_net = ValueNetwork(cfg)
         self.pi_net = PolicyNetwork(cfg)
 
-    def forward(self, features):
-        cval, lval, gate_action = self.value_net(features)
-        pi = self.pi_net(features)
-        pi = torch.cat((gate_action, pi.flatten(start_dim=1)), dim=-1)
+    def forward(self, features, current_qubit=None):
+        cval, lval = self.value_net(features)
+        pi = self.pi_net(features)  # (bs, nqubits, board_size)
+        if current_qubit is not None:
+            if isinstance(current_qubit, (int, float)):
+                # Single qubit index (inference)
+                pi = pi[:, current_qubit, :]  # (bs, board_size)
+            else:
+                # Batched qubit indices (training): (bs,) tensor
+                bs = pi.shape[0]
+                pi = pi[torch.arange(bs, device=pi.device), current_qubit]  # (bs, board_size)
         return (F.log_softmax(cval, dim=1),
                 F.log_softmax(lval, dim=1),
-                F.log_softmax(pi, dim=1))
+                F.log_softmax(pi, dim=-1))
 
 
 # ---- Main Network Wrapper ----
@@ -250,12 +272,16 @@ class Network(nn.Module):
 
     def inference(self, observation: dict, aslist=False) -> NetworkOutput:
         features = observation['features']
+        current_qubit = observation.get('current_qubit', None)
         if features.dim() == 3:
             features = features[None, :]  # add batch dim
         if not self.use_fake:
             device = next(self.nnet.parameters()).device
             features = features.to(device)
-        output = self.nnet(features)
+        if self.use_fake:
+            output = self.nnet(features)
+        else:
+            output = self.nnet(features, current_qubit=current_qubit)
         correctness_logits, latency_logits, pi = output
         correctness_mean = self.logits2values(correctness_logits)
         latency_mean = self.logits2values(latency_logits)
@@ -274,8 +300,12 @@ class Network(nn.Module):
             policy_logits=pi,
         )
 
-    def forward(self, batch, policy_entropy_weight=0.0):
-        predictions = self.inference(batch['obs'])
+    def forward(self, batch):
+        obs_with_qubit = {
+            'features': batch['obs']['features'],
+            'current_qubit': batch['obs']['current_qubit'],
+        }
+        predictions = self.inference(obs_with_qubit)
         with self.t_nnet.average_parameters(), torch.no_grad():
             bootstrap_predictions = self.inference(batch['bootstrap_obs'])
 
@@ -302,11 +332,6 @@ class Network(nn.Module):
         )
         cw, lw = self.cfg.correctness_weight, self.cfg.latency_weight
         total = (policy_loss + cw * correctness_loss + lw * latency_loss).mean()
-
-        if policy_entropy_weight > 0:
-            pi_probs = torch.exp(predictions.policy_logits)
-            entropy = -(pi_probs * predictions.policy_logits).sum(dim=-1).mean()
-            total = total - policy_entropy_weight * entropy
 
         return {
             'total': total,

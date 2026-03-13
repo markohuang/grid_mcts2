@@ -116,18 +116,21 @@ class AlphaAtomsTrainer:
         td_steps = self.config.training.td_steps
         features, bootstrap_features = [], []
         cvals, lvals, pis, bvals = [], [], [], []
+        current_qubits = []
         for i in range(len(game.history)):
             obs = game.make_observation(i)
             bootstrap_obs = game.make_observation(min(i + td_steps, len(game.history)))
-            target = game.make_target(i, td_steps, -1)
+            target = game.make_target(i, td_steps)
             features.append(obs['features'].float())
             bootstrap_features.append(bootstrap_obs['features'].float())
             cvals.append(target.correctness_value)
             lvals.append(target.latency_value)
             pis.append(target.policy)
             bvals.append(target.bootstrap_discount)
+            current_qubits.append(obs.get('current_qubit', -1))
         observations = TensorDict({
             ('obs', 'features'): torch.stack(features),
+            ('obs', 'current_qubit'): torch.tensor(current_qubits, dtype=torch.long),
             ('bootstrap_obs', 'features'): torch.stack(bootstrap_features),
             ('target', 'correctness_values'): torch.tensor(cvals, dtype=torch.float32),
             ('target', 'latency_values'): torch.tensor(lvals, dtype=torch.float32),
@@ -153,7 +156,7 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
-            losses = model(batch, policy_entropy_weight=cfg.policy_entropy_weight)
+            losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
             fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)

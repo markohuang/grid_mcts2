@@ -24,8 +24,27 @@ def apply_moves_batch(board: Board, atom_positions: AtomPositions, moves: Moves)
         board, atom_positions = apply_move(board, atom_positions, moves[i])
     return board, atom_positions
 
+def move_qubit_to_cell(board: Board, atom_positions: AtomPositions, qubit_idx: int, flat_dest: int, board_width: int) -> tuple[Board, AtomPositions, Move]:
+    src_row, src_col = atom_positions[qubit_idx].tolist()
+    dst_row, dst_col = flat_dest // board_width, flat_dest % board_width
+    move = torch.tensor([src_row, src_col, dst_row, dst_col], dtype=torch.long)
+    board, atom_positions = apply_move(board, atom_positions, move)
+    return board, atom_positions, move
+
+def get_legal_actions_for_qubit(board: Board, atom_positions: AtomPositions, qubit_idx: int) -> list[int]:
+    board_h, board_w = board.shape
+    board_size = board_h * board_w
+    empty_mask = (board == EMPTY_CELL).view(-1)
+    row, col = atom_positions[qubit_idx].tolist()
+    current_flat = row * board_w + col
+    actions = [current_flat]  # no-op: stay in place
+    for flat_dest in range(board_size):
+        if flat_dest != current_flat and empty_mask[flat_dest]:
+            actions.append(flat_dest)
+    return actions
+
+# Legacy action encoding (kept for backward compat during transition)
 def action_to_move(action: int, atom_positions: AtomPositions, board_shape: tuple[int, int]) -> Move:
-    # action = 1 + qubit_idx * board_size + flat_dest (action 0 = GATE)
     action -= 1
     board_size = board_shape[0] * board_shape[1]
     qubit_idx = action // board_size

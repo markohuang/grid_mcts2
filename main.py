@@ -17,8 +17,7 @@ _CONFIG = config_flags.DEFINE_config_dict('config', get_config())
 def print_config_summary(config, network):
     print(f"Map {config.map_num}: {config.env.board_height}x{config.env.board_width}, "
           f"{config.env.num_qubits} qubits, {config.network.num_tasks} tasks")
-    print(f"Action space: {config.network.num_actions}, Use fake: {config.use_fake}, "
-          f"Reward: {config.env.reward_mode}")
+    print(f"Action space: {config.network.num_actions} (board_size), Use fake: {config.use_fake}")
     if not config.use_fake:
         n_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
         print(f"Trainable params: {n_params}, "
@@ -36,8 +35,6 @@ def format_selfplay_summary(sp_metrics):
         parts.append(f"root_val={sp_metrics['avg_root_value']:.2f}")
     if 'avg_policy_entropy' in sp_metrics:
         parts.append(f"pi_entropy={sp_metrics['avg_policy_entropy']:.2f}")
-    if 'gate_action_fraction' in sp_metrics:
-        parts.append(f"gate_frac={sp_metrics['gate_action_fraction']:.2f}")
     return ', '.join(parts)
 
 

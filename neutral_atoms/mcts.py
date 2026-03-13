@@ -13,16 +13,19 @@ if TYPE_CHECKING:
 MAXIMUM_FLOAT_VALUE = float('inf')
 
 
-def visit_softmax_temperature(steps):
-    if steps < 500e3:
-        return 2.0
-    return 0.5 if steps < 750e3 else 0.25
+def get_temperature(steps, config):
+    t_init = config.temperature_init
+    t_final = config.temperature_final
+    decay_steps = config.temperature_decay_steps
+    if steps >= decay_steps:
+        return t_final
+    alpha = steps / decay_steps
+    return t_init + alpha * (t_final - t_init)
 
 
 class Node:
     def __init__(self, prior):
         self.visit_count = 0
-        self.to_play = -1
         self.prior = prior
         self.value_sum = 0
         self.children = {}
@@ -35,21 +38,6 @@ class Node:
         if self.visit_count == 0:
             return 0
         return self.value_sum / self.visit_count
-
-
-class ActionHistory:
-    def __init__(self, history, action_space_size):
-        self.history = list(history)
-        self.action_space_size = action_space_size
-
-    def clone(self):
-        return ActionHistory(self.history, self.action_space_size)
-
-    def add_action(self, action):
-        self.history.append(action)
-
-    def to_play(self):
-        return -1
 
 
 class MinMaxStats:
@@ -76,21 +64,15 @@ def play_game(game: Game, config, network: Network) -> Game:
         current_observation = game.make_observation(-1)
         with torch.no_grad():
             network_output = network.inference(current_observation, aslist=True)
-        _expand_node(
-            root, game.to_play(), game.legal_actions(),
-            network_output, reward=0
-        )
+        _expand_node(root, game.legal_actions(), network_output, reward=0)
         _backpropagate(
-            [root], network_output.value, game.to_play(),
+            [root], network_output.value,
             config.discount, min_max_stats,
         )
         _add_exploration_noise(config, root)
 
-        run_mcts(
-            config, root, game.action_history(), network,
-            min_max_stats, game.environment,
-        )
-        action = _select_action(len(game.history), root, network, game.action_space_size)
+        run_mcts(config, root, game.history, network, min_max_stats, game.environment)
+        action = _select_action(network.training_steps(), root, config, game.action_space_size)
         game.cache_observation()
         game.apply(action)
         game.store_search_statistics(root)
@@ -98,9 +80,8 @@ def play_game(game: Game, config, network: Network) -> Game:
     return game
 
 
-def run_mcts(config, root, action_history, network, min_max_stats, env):
+def run_mcts(config, root, history, network, min_max_stats, env):
     for _ in range(config.num_simulations):
-        history = action_history.clone()
         node = root
         search_path = [node]
         sim_env = env.clone()
@@ -108,28 +89,28 @@ def run_mcts(config, root, action_history, network, min_max_stats, env):
         while node.expanded():
             action, node = _select_child(config, node, min_max_stats)
             result = sim_env.step(action)
-            history.add_action(action)
             search_path.append(node)
 
-        obs_features = {'features': make_features(result.observation, sim_env.tasks)}
+        obs = sim_env._get_observation()
+        obs_features = {
+            'features': make_features(obs, sim_env.tasks),
+            'current_qubit': obs.get('current_qubit', -1),
+        }
         with torch.no_grad():
             network_output = network.inference(obs_features, aslist=True)
-        _expand_node(
-            node, history.to_play(), sim_env.legal_actions(),
-            network_output, result.reward
-        )
+        _expand_node(node, sim_env.legal_actions(), network_output, result.reward)
         _backpropagate(
-            search_path, network_output.value, history.to_play(),
+            search_path, network_output.value,
             config.discount, min_max_stats,
         )
 
 
-def _select_action(num_moves, node, network, action_space_size):
+def _select_action(training_steps, node, config, action_space_size):
     visit_counts = [
         (child.visit_count, action)
         for action, child in node.children.items()
     ]
-    t = visit_softmax_temperature(network.training_steps())
+    t = get_temperature(training_steps, config)
     return _softmax_sample(visit_counts, t, action_space_size)
 
 
@@ -157,8 +138,7 @@ def _ucb_score(config, parent, child, min_max_stats):
     return prior_score + value_score
 
 
-def _expand_node(node, to_play, actions, network_output, reward):
-    node.to_play = to_play
+def _expand_node(node, actions, network_output, reward):
     node.reward = reward
     policy = {a: math.exp(network_output.policy_logits[a]) for a in actions}
     policy_sum = sum(policy.values())
@@ -166,9 +146,9 @@ def _expand_node(node, to_play, actions, network_output, reward):
         node.children[action] = Node(p / policy_sum)
 
 
-def _backpropagate(search_path, value, to_play, discount, min_max_stats):
+def _backpropagate(search_path, value, discount, min_max_stats):
     for node in reversed(search_path):
-        node.value_sum += value if node.to_play == to_play else -value
+        node.value_sum += value
         node.visit_count += 1
         min_max_stats.update(node.value())
         value = node.reward + discount * value

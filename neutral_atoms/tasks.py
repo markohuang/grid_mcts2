@@ -18,3 +18,6 @@ def count_total_gates(tasks: Tasks) -> int:
 
 def is_episode_done(tasks_done: int, num_tasks: int) -> bool:
     return tasks_done >= num_tasks
+
+def get_relevant_atoms(tasks: Tasks, layer_idx: int) -> list[int]:
+    return sorted({q for pair in tasks[layer_idx] for q in pair})

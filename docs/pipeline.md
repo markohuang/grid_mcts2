@@ -2,7 +2,29 @@
 
 ## Problem
 
-Given a grid of neutral atoms and a sequence of quantum gate layers (each layer = list of qubit pairs that must interact), find the optimal sequence of atom moves that minimizes the total number of parallel execution steps needed to complete all gate layers. Two atom moves can execute in parallel only if their paths don't cross rows or columns (AOD constraint).
+Given a grid of neutral atoms and a sequence of quantum gate layers (each layer = list of qubit pairs that must interact), find the optimal sequence of atom placements that minimizes the total number of parallel execution steps needed to complete all gate layers. Two atom moves can execute in parallel only if their paths don't cross rows or columns (AOD constraint).
+
+## Layer-Level MDP
+
+The environment operates as a **per-qubit sequential placement** model:
+
+```
+For each gate layer t (t = 0..num_tasks-1):
+    relevant_atoms = sorted({q for pair in tasks[t] for q in pair})
+    For each atom q in relevant_atoms (fixed order):
+        Agent chooses action = flat_dest (0..board_size-1)
+        → Place qubit q at cell flat_dest
+        → Legal actions: empty cells + current cell (no-op)
+    Layer t auto-executes (tasks_done++)
+Episode ends when all layers are done.
+```
+
+| Property | Value |
+|----------|-------|
+| Action space | `board_size` (e.g., 12 for 2x6, 16 for 4x4) |
+| Branching factor | ~9-15 (empty cells + current cell) |
+| Episode length | `sum(k_t)` — deterministic |
+| Completion rate | 100% by construction |
 
 ## Pipeline
 
@@ -41,15 +63,15 @@ Given a grid of neutral atoms and a sequence of quantum gate layers (each layer 
 For each game:
 
 1. **Initialize** environment with atom positions and gate tasks
-2. **MCTS search** at each step:
+2. **MCTS search** at each step (one per qubit placement):
    - **Select**: Traverse tree using UCB scores (prior + value)
    - **Expand**: Clone environment, step action, query network for value + policy
-   - **Backpropagate**: Update visit counts and value estimates up the path
+   - **Backpropagate**: Update visit counts and value estimates (single-player: always add)
    - Repeat for `num_simulations` iterations
-3. **Action selection**: Sample from visit count distribution (softmax with temperature)
-4. **Step environment**: Execute chosen action (move atom or execute gate layer)
+3. **Action selection**: Sample from visit count distribution (softmax with temperature decay)
+4. **Step environment**: Place current qubit at chosen cell; if last qubit in layer, auto-execute
 5. **Store statistics**: Visit count distribution (policy target) and root value
-6. **Repeat** until done or budget exhausted
+6. **Repeat** until all layers done
 
 ```
 Environment state ──▶ make_features() ──▶ Network.inference()
@@ -57,19 +79,23 @@ Environment state ──▶ make_features() ──▶ Network.inference()
                                     ┌─────────┴─────────┐
                                     ▼                     ▼
                               Policy logits          Value estimate
-                              (action priors)        (correctness + latency)
+                              (board_size dim)       (correctness + latency)
 ```
 
 ### Feature construction (network.py: make_features)
 
 ```
-Input: board_onehot (board_size × num_qubits)
+Input: board_onehot (board_size × num_qubits+1), current_qubit
 
-Slot 0: raw board state (reference)
+Slot 0: board state (one-hot qubit positions)
 Slot 1..N: board state + gate pair indicators for each task layer
            (qubits involved in gates get +1.0 marker)
 
 Output: (num_tasks+1, board_size, num_qubits) tensor
+
+Qubit identity is injected after mixer1 in both ValueNetwork and PolicyNetwork
+via deterministic sinusoidal embeddings (nqubits, dim), analogous to positional
+encodings in transformers.
 ```
 
 ### Network architecture (network.py)
@@ -84,19 +110,19 @@ Features ──▶ NeutralAtomsMLP2
     MLPMixer ×2       MLPMixer ×2
           │                │
     ┌─────┴─────┐         ▼
-    ▼           ▼     W_pi ──▶ move logits (per qubit × per cell)
-correctness  latency        │
- logits      logits    gate_action logit
+    ▼           ▼     W_pi ──▶ per-qubit logits (nqubits × board_size)
+correctness  latency       │
+ logits      logits    select current_qubit slice
     │           │           │
-    └─────┬─────┘     concat(gate_action, move_logits)
-          │                │
-   categorical         log_softmax ──▶ policy_logits
+    └─────┬─────┘      log_softmax ──▶ policy_logits (board_size)
+          │
+   categorical
    distributions
    over value bins
 ```
 
 - **Value head**: Outputs categorical distributions over `num_bins` bins (not scalar). Converted to scalar via expectation (`logits2values`).
-- **Policy head**: One logit for "execute gate" action + `num_qubits × board_size` logits for move actions.
+- **Policy head**: `(batch, nqubits, board_size)` logits. At inference, current qubit's slice is selected → `(batch, board_size)`. During training, batched per-sample qubit indices are gathered.
 - **Target network**: EMA shadow copy of the real network, used for bootstrap value estimation during training.
 
 ### Training phase (trainer.py: fit)
@@ -122,27 +148,28 @@ Replay Buffer ──sample batch──▶ Network.forward(batch)
 ```
 
 Training targets per step `i`:
-- **Policy target**: MCTS visit count distribution at step `i`
+- **Policy target**: MCTS visit count distribution at step `i` (board_size-dim vector)
 - **Correctness value target**: TD(n) return = `Σ(γ^k × r_{i+k})` + bootstrap from target network
 - **Latency value target**: `-cost` if episode completed all tasks, else 0
 
 ### Reward signal (rewards.py)
 
 ```
-reward = (prev_cost - curr_cost) × reward_scale
-       + (prev_entropy - curr_entropy) × entropy_weight
+reward = reward_scale * (prev_current_layer_cost - curr_current_layer_cost)
 ```
 
-Where `cost` = total parallel execution steps needed for all remaining gates given current atom positions. This provides dense reward: every move that improves future parallelism is immediately rewarded.
+Where `current_layer_cost` = parallel execution cost of the **current gate layer only** given current atom positions (computed before auto-execute). Previous versions used the total remaining cost across all layers, but that telescoped to a constant cumulative reward regardless of actions, making it impossible for MCTS to distinguish good from bad trajectories. Using current-layer-only cost breaks the telescoping sum and provides a meaningful dense signal.
 
 ### Action space (env.py)
 
 ```
-Action 0:              Execute current gate layer
-Action 1 + q*S + p:    Move qubit q to cell p (S = board_size)
+Action = flat_dest (0..board_size-1)
+  = which cell to place the current qubit in
+  Current cell = no-op (stay in place)
+  Other empty cells = move qubit there
 ```
 
-Legal actions exclude moves to occupied cells and are empty when all tasks are done or budget is exhausted.
+Legal actions: current cell + all empty cells. Occupied cells (by other atoms) are excluded.
 
 ### Config structure (config.py)
 
@@ -151,17 +178,19 @@ config
 ├── map_num          # Which map to use (0, 1, 2)
 ├── use_fake         # Use FakeNet for testing
 ├── env
-│   ├── budget, entropy_weight, reward_scale
+│   ├── reward_scale
 │   └── board_height, board_width, num_qubits  (derived from map)
 ├── mcts
 │   ├── num_simulations, discount, max_moves
 │   ├── pb_c_base, pb_c_init                   (UCB constants)
 │   ├── root_dirichlet_alpha, root_exploration_fraction
+│   ├── temperature_init, temperature_final, temperature_decay_steps
 │   └── known_bounds.{min, max}
 ├── training
 │   ├── epochs, num_selfplay, training_steps
 │   ├── batch_size, lr, grad_norm_clip
 │   ├── buffer_size, td_steps
+│   ├── policy_target_temperature
 │   ├── log_interval
 │   └── accelerator, devices, seed
 ├── experiment
@@ -171,6 +200,7 @@ config
 └── network
     ├── v_hsize, p_hsize, mlp_depth
     ├── ema_decay, num_bins, value_min, value_max
+    ├── correctness_weight, latency_weight
     └── num_tasks, num_qubits, board_size, num_actions  (derived from map)
 ```
 
@@ -181,18 +211,28 @@ outputs/
 ├── run_registry.jsonl              # one JSON line per completed run
 └── <run_id>/                       # 8-char hex hash
     ├── config.json                 # frozen ConfigDict
+    ├── metrics.jsonl               # per-epoch metrics
     ├── checkpoints/
     │   ├── epoch_010.ckpt          # periodic (every checkpoint_every_n_epochs)
     │   └── final.ckpt              # always saved at end
     └── solutions/
-        └── best.json               # atom-viz compatible (board + circuit + plan)
+        ├── best.json               # atom-viz compatible (board + circuit + plan)
+        └── best_trace.json         # per-step trace (action type, qubit, cost delta)
 ```
 
 **Total cost** = reconfig parallel groups + gate execution groups (2x per layer for AOD enter/exit).
 
-**Early stopping**: tracks `best_cost` across completed games per epoch. After `early_stopping_patience` consecutive epochs without improvement (only counting epochs with completions), training halts.
+**Early stopping**: tracks `best_cost` across completed games per epoch. After `early_stopping_patience` consecutive epochs without improvement, training halts.
 
-**Solution format** (atom-viz compatible):
-- `board`: rows, cols, initialAtoms (dict of atom_id → {row, col})
-- `circuit`: list of gate layers (list of qubit pairs)
-- `plan`: list of parallel move groups, each group is list of {atom, from, to}
+### Cost computation detail
+
+Solution cost is computed by replaying the game and tracking actual moves per layer:
+
+```
+For each layer:
+    reconfig_cost = count_groups(moves made during this layer)
+    gate_cost = 2 × count_groups(gate interactions from final positions)
+    total += reconfig_cost + gate_cost
+```
+
+The dense reward uses a per-layer heuristic: at each step, `_cached_cost` = parallel execution cost of the current gate layer given current atom positions (computed before auto-execute). Reward = prev_current_layer_cost - curr_current_layer_cost. This breaks the telescoping sum that plagued the old all-layers cost, allowing MCTS to distinguish good from bad action sequences.

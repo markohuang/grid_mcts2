@@ -42,10 +42,7 @@ def get_config():
     c.use_fake = False
 
     c.env = ml_collections.ConfigDict()
-    c.env.budget = 24
-    c.env.entropy_weight = 0.0
     c.env.reward_scale = 1.0
-    c.env.reward_mode = 'cost_delta'
 
     c.mcts = ml_collections.ConfigDict()
     c.mcts.num_simulations = 50
@@ -56,6 +53,9 @@ def get_config():
     c.mcts.root_exploration_fraction = 0.25
     c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
     c.mcts.max_moves = 10000
+    c.mcts.temperature_init = 2.0
+    c.mcts.temperature_final = 0.25
+    c.mcts.temperature_decay_steps = 1000
 
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50
@@ -70,7 +70,6 @@ def get_config():
     c.training.accelerator = 'auto'
     c.training.devices = 1
     c.training.seed = 12315
-    c.training.policy_entropy_weight = 0.0
     c.training.policy_target_temperature = 1.0
     c.training.num_parallel_games = 1
 
@@ -105,4 +104,4 @@ def set_derived_config(config):
         config.network.num_tasks = len(m['tasks'])
         config.network.num_qubits = num_qubits
         config.network.board_size = board_size
-        config.network.num_actions = 1 + num_qubits * board_size
+        config.network.num_actions = board_size

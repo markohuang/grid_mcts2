@@ -11,37 +11,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Current status
 
-Best costs: Map 0 = **13**, Map 1 = **13** (lower bound: 6 for both). System works end-to-end. The main bottleneck is the **"execute immediately" attractor** — the network converges to the trivial strategy of executing gate layers without reconfiguration. Policy entropy collapse (Round 01) is a symptom; the root cause is that reconfig moves have no immediate reward, making multi-step planning a credit assignment problem. Target temperature and entropy bonus (Round 02) keep entropy alive but don't improve costs. See `experiments/README.md` for proposed next steps.
+**Layer-level MDP** (Phase 0B complete). The "execute immediately" attractor from the old MDP is eliminated — there is no GATE_ACTION. The agent places atoms one at a time per layer, and layers auto-execute when all relevant atoms are placed. Episodes are deterministic length (`sum(k_t)` where `k_t` = relevant atoms per layer). Action space = `board_size` (~12-25) instead of the old `1 + Q * board_size` (~129). 100% completion rate by construction.
+
+Next: **Round 04 experiments** (validate new MDP) and **Phase 1** (Iterative Refinement Model). See `docs/iterative_refinement_reference.md` and `roadmap.md`.
 
 ## Setup
 
-Uses a uv-managed virtual environment. Always use `.venv/bin/python` (not system python).
+Uses a uv-managed virtual environment at `../grid_mcts2/.venv`.
 
 ```bash
 # Install dependencies
 uv pip install torch lightning torchrl tensordict einops numpy ml_collections absl-py
 
 # Activate for interactive use
-source .venv/bin/activate
+source ../grid_mcts2/.venv/bin/activate
 ```
 
 ## Commands
 
 ```bash
 # Run training (full)
-.venv/bin/python main.py --config.training.epochs=50 --config.training.num_selfplay=20 --config.training.batch_size=128
+../grid_mcts2/.venv/bin/python main.py --config.training.epochs=50 --config.training.num_selfplay=20 --config.training.batch_size=128
 
 # Quick smoke test with FakeNet (no GPU, no real network)
-.venv/bin/python main.py --config.use_fake=True --config.training.epochs=2
+../grid_mcts2/.venv/bin/python main.py --config.use_fake=True --config.training.epochs=2
 
 # Small real-network test
-.venv/bin/python main.py --config.training.epochs=1 --config.training.num_selfplay=2 --config.training.batch_size=32 --config.training.training_steps=10
+../grid_mcts2/.venv/bin/python main.py --config.training.epochs=1 --config.training.num_selfplay=2 --config.training.batch_size=32 --config.training.training_steps=10
 
-# Run tests (pytest on the moves/parallel-grouping tests)
-.venv/bin/python -m pytest neutral_atoms/test_env.py -v
+# Run tests (pytest on the moves/parallel-grouping + layer-level MDP tests)
+../grid_mcts2/.venv/bin/python -m pytest neutral_atoms/test_env.py -v
 
 # Select map (0=2x6/9q, 1=4x4/8q, 2=5x5/12q)
-.venv/bin/python main.py --config.map_num=1
+../grid_mcts2/.venv/bin/python main.py --config.map_num=1
 ```
 
 Config uses `ml_collections.ConfigDict` with `absl` flags. Override any config value with `--config.<path>=<value>` (dot notation for nested fields). See `neutral_atoms/config.py:get_config()` for all available fields.
@@ -58,6 +60,17 @@ Config uses `ml_collections.ConfigDict` with `absl` flags. Override any config v
 
 This is an AlphaZero-style MCTS training system for neutral atom quantum computing. The goal is to learn optimal atom reconfiguration sequences that minimize parallel execution steps for quantum gate layers.
 
+### Layer-Level MDP
+
+The environment uses a **per-qubit sequential placement** model:
+- For each gate layer, `relevant_atoms = sorted({q for pair in tasks[layer] for q in pair})` gives k_t qubits
+- The agent places them **one at a time in fixed order**
+- **Action space = `board_size`** (which cell to place the current qubit in)
+- Legal actions: empty cells + current cell (no-op = stay in place)
+- After k_t placements, the layer auto-executes and `tasks_done` increments
+- Episode length = `sum(k_t)` — deterministic, no budget needed
+- **Branching factor: ~9-15** (empty cells) vs old 129 (all qubits x all cells + gate)
+
 ### Training loop (`main.py` → `trainer.py`)
 
 Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **train** (gradient steps on sampled batches) → **checkpoint/early-stop**.
@@ -66,7 +79,7 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 - `fit()` returns `{'loss': float}` or `None` (FakeNet / buffer too small).
 - `save_checkpoint(path)` saves model + optimizer via Fabric.
 - `trainer.py` uses **Lightning Fabric** for device management (CPU/GPU) and **torchrl's `TensorDictReplayBuffer`** for experience storage.
-- Training data is stored as `TensorDict` with nested keys: `('obs', 'features')`, `('bootstrap_obs', 'features')`, `('target', 'correctness_values')`, etc.
+- Training data is stored as `TensorDict` with nested keys: `('obs', 'features')`, `('obs', 'current_qubit')`, `('bootstrap_obs', 'features')`, `('target', 'correctness_values')`, etc.
 
 ### Device lifecycle
 
@@ -81,27 +94,30 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 
 - `Network` wraps `NeutralAtomsMLP2` (real) or `FakeNet` (uniform random for testing).
 - `NeutralAtomsMLP2` = `ValueNetwork` + `PolicyNetwork`, both using MLPMixer blocks.
-- Input features: `(batch, num_tasks+1, board_size, num_qubits)` — slot 0 is raw board, slots 1..N encode gate pair indicators.
+- Input features: `(batch, num_tasks+1, board_size, num_qubits)` — slot 0 is board state, slots 1..N encode gate pair indicators. Qubit identity is injected after mixer1 in both ValueNetwork and PolicyNetwork via deterministic sinusoidal embeddings `(nqubits, dim)`, analogous to positional encodings in transformers.
+- `PolicyNetwork` outputs `(batch, num_qubits, board_size)` — per-qubit policy logits. At inference, the current qubit's slice is selected. During training, batched `current_qubit` indices are used for gather.
 - Value head outputs categorical distributions over bins (not scalar values). `logits2values()` converts via expectation.
 - Target network uses EMA (`t_nnet`) with `average_parameters()` context manager for bootstrap value computation.
 
 ### Environment (`env.py`, `board.py`, `moves.py`, `rewards.py`)
 
-- Actions: `0` = execute gate layer, `1+` = move qubit q to cell p (encoded as `1 + q * board_size + p`).
-- Reward is dense: every step compares cost-before vs cost-after of executing all remaining gates, so moves that improve future parallelism are immediately rewarded.
-- Reward modes (`config.env.reward_mode`): `cost_delta` (default, full cost including reconfig groups), `gate_only` (only gate parallelism cost — reconfig is free), `conflict_count` (pairwise gate-move conflicts), `manhattan` (sum of Manhattan distances between gate partners). The real total cost (`_cached_cost`) is always tracked for metrics regardless of reward mode.
+- Actions: cell index (0..board_size-1) — where to place the current qubit
+- Reward is dense: every step compares current-layer cost before vs after the action (computed before auto-execute). Uses current layer only (not all remaining layers) to break the telescoping sum that made cumulative reward constant.
+- `compute_reward(prev_cost, curr_cost, reward_scale) -> float`
 - Parallel grouping uses the AOD constraint: two atom moves can execute simultaneously only if they don't cross in rows or columns. Implemented as vectorized pairwise compatibility check + greedy graph coloring.
 
 ### MCTS (`mcts.py`)
 
-Standard AlphaZero MCTS with environment cloning for simulation. Uses UCB selection, Dirichlet noise at root, softmax temperature for action selection. Each simulation clones the environment and steps through it — no learned dynamics model.
+Standard AlphaZero MCTS with environment cloning for simulation. Uses UCB selection, Dirichlet noise at root, linear temperature decay (`temperature_init` → `temperature_final` over `temperature_decay_steps`). Each simulation clones the environment and steps through it — no learned dynamics model. Single-player: `_backpropagate` always adds value (no negation).
 
 ## Config system (`neutral_atoms/config.py`)
 
 - `get_config()` returns a `ml_collections.ConfigDict` with five sub-configs: `env`, `mcts`, `training`, `network`, `experiment`.
 - `set_derived_config(config)` computes map-dependent values (board dims, num_qubits, action space size) and writes them into `config.env` and `config.network`.
+- `config.network.num_actions = board_size` (action space is per-qubit cell selection).
 - Map definitions (`MAPS`) and `atom_map_to_positions()` live in `config.py`.
 - Top-level flags: `config.map_num`, `config.use_fake`.
+- Temperature config: `mcts.temperature_init`, `mcts.temperature_final`, `mcts.temperature_decay_steps`.
 
 ## Experiment tracking (`neutral_atoms/experiment.py`)
 
@@ -109,7 +125,7 @@ Each run creates `outputs/<run_id>/` with:
 - `config.json` — frozen ConfigDict snapshot
 - `checkpoints/` — periodic + final model checkpoints (Lightning Fabric)
 - `solutions/best.json` — atom-viz compatible JSON (board, circuit, plan)
-- `solutions/best_trace.json` — per-step trace with action type, qubit/src/dst, cost before/after, reward
+- `solutions/best_trace.json` — per-step trace with action type (move/noop), qubit/src/dst, cost before/after, reward
 
 `outputs/run_registry.jsonl` tracks all completed runs with config + metrics.
 
@@ -122,11 +138,8 @@ Total cost metric = reconfig parallel groups + gate execution groups (2x per lay
 Experiment logs live in `experiments/`. Each round is a standalone markdown with hypotheses, exact reproducible commands, results, and analysis. See `experiments/README.md` for the index.
 
 ```bash
-# Run a prepared experiment script
-bash experiments.sh
-
 # Custom single run
-.venv/bin/python main.py --config.mcts.num_simulations=25 --config.training.epochs=15
+../grid_mcts2/.venv/bin/python main.py --config.mcts.num_simulations=25 --config.training.epochs=15
 
 # Check results
 cat outputs/run_registry.jsonl

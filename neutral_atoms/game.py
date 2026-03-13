@@ -2,7 +2,6 @@ import math
 from typing import NamedTuple, Sequence
 
 from .env import NeutralAtomsEnv
-from .mcts import Node, ActionHistory
 from .network import make_features
 
 
@@ -24,13 +23,14 @@ class Game:
         self.rewards = []
         self.child_visits = []
         self.root_values = []
-        self.action_space_size = config.network.num_actions
+        self.action_space_size = config.network.num_actions  # board_size
         self.discount = config.mcts.discount
         self.policy_target_temperature = config.training.policy_target_temperature
         self.done = False
         self.last_info = {}
         self.latency_reward = 0.0
         self.observation_cache = []
+        self.current_qubit_cache = []  # track which qubit was active at each step
 
     def terminal(self):
         return self.done or not self.environment.legal_actions()
@@ -69,20 +69,31 @@ class Game:
     def cache_observation(self):
         obs = self.environment._get_observation()
         self.observation_cache.append(make_features(obs, self.tasks))
+        self.current_qubit_cache.append(obs.get('current_qubit', -1))
 
     def make_observation(self, state_index):
         if state_index == -1:
             obs = self.environment._get_observation()
-            return {'features': make_features(obs, self.tasks)}
+            return {
+                'features': make_features(obs, self.tasks),
+                'current_qubit': obs.get('current_qubit', -1),
+            }
         if state_index < len(self.observation_cache):
-            return {'features': self.observation_cache[state_index]}
+            return {
+                'features': self.observation_cache[state_index],
+                'current_qubit': self.current_qubit_cache[state_index] if state_index < len(self.current_qubit_cache) else -1,
+            }
         env = NeutralAtomsEnv(self.tasks, self.initial_positions, self.env_config)
-        obs = env.reset()
+        env.reset()
         for action in self.history[:state_index]:
-            obs = env.step(action).observation
-        return {'features': make_features(obs, self.tasks)}
+            env.step(action)
+        obs = env._get_observation()
+        return {
+            'features': make_features(obs, self.tasks),
+            'current_qubit': obs.get('current_qubit', -1),
+        }
 
-    def make_target(self, state_index, td_steps, to_play):
+    def make_target(self, state_index, td_steps):
         bootstrap_index = state_index + td_steps
         value = 0.0
         for i, reward in enumerate(self.rewards[state_index:bootstrap_index]):
@@ -99,9 +110,3 @@ class Game:
             self.child_visits[state_index],
             bootstrap_discount,
         )
-
-    def to_play(self):
-        return -1
-
-    def action_history(self):
-        return ActionHistory(self.history, self.action_space_size)

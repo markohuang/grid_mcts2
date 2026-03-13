@@ -11,24 +11,31 @@ Run outputs live in `outputs/<run_id>/` with per-epoch `metrics.jsonl` and `conf
 |-------|------|-------|-------------|
 | [01](01_sanity_checks.md) | 2026-03-12 | Baseline sanity checks | MCTS + learning both work; policy entropy collapses to 0 prematurely |
 | [02](02_entropy_collapse.md) | 2026-03-12 | Entropy collapse fixes on Map 1 | Target temp and entropy bonus don't solve the real issue — the "execute immediately" attractor |
-| [03](03_alphadev_fixes_and_scaleup.md) | 2026-03-13 | AlphaDev alignment fixes + scale-up | _In progress_ |
+| [03](03_alphadev_fixes_and_scaleup.md) | 2026-03-13 | AlphaDev alignment fixes + scale-up | Bootstrap, two-hot, value bins fixes |
+| **04** (planned) | TBD | **Layer-level MDP validation** | First experiments with new per-qubit placement MDP |
 
-## Known bottlenecks
+## Architecture change: Layer-Level MDP
 
-1. **"Execute immediately" attractor.** On all maps tested, the network converges to the trivial strategy of just executing gate layers without reconfiguration (avg_steps=3.0, cost=18 on Map 1). Reconfig moves have zero/negative immediate reward, so the network never learns that they can reduce future gate parallelism cost. This is a multi-step credit assignment problem.
+Between Round 03 and Round 04, the environment was restructured:
 
-2. **Policy entropy collapse** (secondary to #1). The network converges to a near-deterministic policy within 5-10 epochs. Policy target temperature (τ=4.0) can keep entropy alive but doesn't improve costs — the policy explores but still converges to "just execute." Entropy bonus (β≤0.05) is too weak to fight peaked training targets.
+- **Old MDP**: action = GATE_ACTION or move(qubit, cell), 129-action space, budget-bounded
+- **New MDP**: action = cell index for current qubit, 12-16 action space, deterministic episode length
 
-## Proposed next experiments (not yet run)
+Key properties:
+- 100% completion rate by construction (no budget, no gate action to choose)
+- Branching factor ~12 vs ~129
+- "Execute immediately" attractor eliminated (no gate action exists)
+- Episodes are deterministic length: `sum(k_t)` where `k_t` = relevant atoms per layer
 
-1. **More MCTS simulations** — 25 sims may be too few for 129-action space. Try 50-100 sims.
-2. **Reward shaping for reconfig** — positive reward for moves that reduce future gate cost.
-3. **Curriculum learning** — start with 1 task layer, then increase.
-4. **Investigate cost=13 solution** — understand what reconfiguration was found to inform approach.
+Baseline costs with random play (FakeNet):
+- Map 0: ~25-29 (no-reconfig baseline: 16, lower bound: 6)
+- Map 1: ~32-33 (no-reconfig baseline: 18, lower bound: 6)
 
-## Best results so far
+## Previous best results (old MDP, for reference)
 
-| Map | Best cost | Lower bound | Config | Run ID |
-|-----|-----------|-------------|--------|--------|
-| 0 (2x6, 9q) | 13 | 6 | high explore (α=0.3, frac=0.5), 10 sims, 15 epochs | 55f9f5d5 |
-| 1 (4x4, 8q) | 13 | 6 | high explore, 25 sims, 20 epochs (lucky early find) | 8d77b799 |
+| Map | Best cost | Lower bound | Notes |
+|-----|-----------|-------------|-------|
+| 0 (2x6, 9q) | 13 | 6 | Old MDP, 129-action space |
+| 1 (4x4, 8q) | 13 | 6 | Old MDP, lucky early find |
+
+These are not directly comparable to the new MDP results since the cost computation and action encoding changed.

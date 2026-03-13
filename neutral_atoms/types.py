@@ -8,7 +8,6 @@ Moves = torch.Tensor         # (M, 4) int64, batch of moves
 GateLayer = list[tuple[int, int]]
 Tasks = list[GateLayer]
 
-GATE_ACTION = 0
 EMPTY_CELL = -1
 
 @dataclass
