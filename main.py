@@ -56,6 +56,12 @@ def main(_):
 
     trainer = AlphaAtomsTrainer(network, config, tasks, initial_positions)
 
+    if config.training.pretrain_value_steps > 0 and not config.use_fake:
+        print(f"\nPretraining value head ({config.training.pretrain_value_steps} steps)...")
+        t0 = time.time()
+        trainer.pretrain_value(config.training.pretrain_value_steps)
+        print(f"  done [{time.time() - t0:.1f}s]")
+
     best_cost, best_game = float('inf'), None
     no_improve_count = 0
     run_metrics = {}

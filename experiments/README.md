@@ -11,7 +11,8 @@ Run outputs live in `outputs/<run_id>/` with per-epoch `metrics.jsonl` and `conf
 |-------|------|-------|-------------|
 | [01](01_sanity_checks.md) | 2026-03-12 | Baseline sanity checks | MCTS + learning both work; policy entropy collapses to 0 prematurely |
 | [02](02_entropy_collapse.md) | 2026-03-12 | Entropy collapse fixes on Map 1 | Target temp and entropy bonus don't solve the real issue — the "execute immediately" attractor |
-| [03](03_alphadev_fixes_and_scaleup.md) | 2026-03-13 | AlphaDev alignment fixes + scale-up | _In progress_ |
+| [03](03_alphadev_fixes_and_scaleup.md) | 2026-03-13 | AlphaDev alignment fixes + scale-up | Value range [-10,10] clips all targets; no learning beyond trivial |
+| [04](04_value_pretraining.md) | 2026-03-13 | Value pretraining + critical bug fixes | _In progress_ |
 
 ## Known bottlenecks
 

@@ -54,7 +54,7 @@ def get_config():
     c.mcts.pb_c_init = 1.25
     c.mcts.root_dirichlet_alpha = 0.03
     c.mcts.root_exploration_fraction = 0.25
-    c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
+    c.mcts.known_bounds = ml_collections.ConfigDict({'min': -25.0, 'max': 25.0})
     c.mcts.max_moves = 10000
 
     c.training = ml_collections.ConfigDict()
@@ -73,6 +73,9 @@ def get_config():
     c.training.policy_entropy_weight = 0.0
     c.training.policy_target_temperature = 1.0
     c.training.num_parallel_games = 1
+    c.training.pretrain_value_steps = 0
+    c.training.aux_value_weight = 0.0
+    c.training.aux_value_samples = 512
 
     c.experiment = ml_collections.ConfigDict()
     c.experiment.output_dir = './outputs'
@@ -85,8 +88,8 @@ def get_config():
     c.network.mlp_depth = 2
     c.network.ema_decay = 0.995
     c.network.num_bins = 101
-    c.network.value_min = -10.0
-    c.network.value_max = 10.0
+    c.network.value_min = -25.0
+    c.network.value_max = 25.0
     c.network.correctness_weight = 1.0
     c.network.latency_weight = 1.0
 

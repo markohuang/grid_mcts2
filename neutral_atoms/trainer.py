@@ -1,4 +1,5 @@
 import torch
+from torch.nn import functional as F
 import concurrent.futures
 from lightning import Fabric
 from tensordict import TensorDict
@@ -6,7 +7,10 @@ from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 
 from .game import Game
 from .mcts import play_game
-from .network import Network
+from .network import Network, make_features
+from .board import create_board
+from .rewards import compute_total_cost
+from .types import EMPTY_CELL
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake):
@@ -148,14 +152,31 @@ class AlphaAtomsTrainer:
         self._setup_fabric()
         fabric, model, optimizer = self._fabric, self._model, self._optimizer
 
+        aux_weight = cfg.aux_value_weight
+        aux_features, aux_costs = None, None
+        if aux_weight > 0:
+            aux_features, aux_costs = self.generate_random_boards(cfg.aux_value_samples)
+            aux_features = aux_features.to(fabric.device)
+            aux_costs = aux_costs.to(fabric.device)
+
         model.train()
         last_losses = None
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
             losses = model(batch, policy_entropy_weight=cfg.policy_entropy_weight)
+            total = losses['total']
+            if aux_weight > 0:
+                idx = torch.randint(len(aux_costs), (cfg.batch_size,))
+                aux_out = model.nnet(aux_features[idx])
+                c_target = model.scalar_to_two_hot(aux_costs[idx])
+                l_target = model.scalar_to_two_hot(-aux_costs[idx])
+                aux_loss = (F.cross_entropy(aux_out[0], c_target)
+                            + F.cross_entropy(aux_out[1], l_target))
+                total = total + aux_weight * aux_loss
+                losses['aux_value'] = aux_loss.item()
             optimizer.zero_grad()
-            fabric.backward(losses['total'])
+            fabric.backward(total)
             fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)
             optimizer.step()
             model.t_nnet.update(model.nnet.parameters())
@@ -171,6 +192,51 @@ class AlphaAtomsTrainer:
 
         model.eval()
         return last_losses
+
+    def generate_random_boards(self, n_samples):
+        board_h, board_w = self.config.env.board_height, self.config.env.board_width
+        board_size = board_h * board_w
+        num_qubits = self.config.env.num_qubits
+        features_list, costs = [], []
+        for _ in range(n_samples):
+            perm = torch.randperm(board_size)[:num_qubits]
+            positions = [(p.item() // board_w, p.item() % board_w) for p in perm]
+            board, atom_positions = create_board(board_h, board_w, positions)
+            flat = board.clone().flatten().long()
+            flat[flat == EMPTY_CELL] = num_qubits
+            onehot = torch.zeros(board_size, num_qubits + 1)
+            onehot.scatter_(1, flat.unsqueeze(1), 1)
+            feat = make_features({'board_onehot': onehot, 'tasks_done': 0}, self.tasks)
+            cost, _ = compute_total_cost(board, atom_positions, self.tasks, 0, [])
+            features_list.append(feat)
+            costs.append(float(cost))
+        return torch.stack(features_list), torch.tensor(costs, dtype=torch.float32)
+
+    def pretrain_value(self, steps):
+        self._setup_fabric()
+        fabric, model, optimizer = self._fabric, self._model, self._optimizer
+        n_samples = self.config.training.aux_value_samples
+        features, costs = self.generate_random_boards(n_samples)
+        features, costs = features.to(fabric.device), costs.to(fabric.device)
+        model.train()
+        batch_size = min(self.config.training.batch_size, n_samples)
+        for step in range(steps):
+            idx = torch.randint(n_samples, (batch_size,))
+            feat_batch, cost_batch = features[idx], costs[idx]
+            output = model.nnet(feat_batch)
+            correctness_logits, latency_logits, _ = output
+            c_target = model.scalar_to_two_hot(cost_batch)
+            l_target = model.scalar_to_two_hot(-cost_batch)
+            loss = (F.cross_entropy(correctness_logits, c_target)
+                    + F.cross_entropy(latency_logits, l_target))
+            optimizer.zero_grad()
+            fabric.backward(loss)
+            fabric.clip_gradients(model, optimizer, max_norm=self.config.training.grad_norm_clip)
+            optimizer.step()
+            model.t_nnet.update(model.nnet.parameters())
+            if (step + 1) % 100 == 0:
+                print(f"  pretrain step {step+1}/{steps}, loss: {loss.item():.4f}")
+        model.eval()
 
     def save_checkpoint(self, path):
         if self.network.use_fake:
