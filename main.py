@@ -88,7 +88,7 @@ def main(_):
 
         print("Training:")
         t0 = time.time()
-        train_result = trainer.fit()
+        train_result = trainer.fit(epoch=epoch)
         train_time = time.time() - t0
 
         epoch_metrics = {

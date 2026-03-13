@@ -103,15 +103,29 @@ The auxiliary loss during training continuously generates (random_board, cost) p
 4. **avg_cost < 18** — is the POLICY learning, not just getting lucky?
 5. **Value head accuracy** — does correctness predict +cost, latency predict -cost?
 
-## Results
+## Results — Phase A
 
-_To be filled in after running._
+| # | Experiment | Run ID | best | avg (final) | gate_frac | epochs | collapsed? |
+|---|-----------|--------|------|-------------|-----------|--------|------------|
+| 1 | Value fix only | 7380ca49 | **14** | **17.5** | 1-48% | 30 | **No** |
+| 2 | + lw>cw (0.5/2.0) | ee5d7958 | 14 | 20.6 | 0-42% | 26 | No |
+| 3 | + pretrain | 8c57fb9b | 18 | 21.5 | 8-49% | 18 | No |
+| 4 | + pretrain + aux | 46ab53f8 | 16 | 18.0 | 7→100% | 19 | Yes (ep 6) |
+| 4b | + freeze 10 ep | 349c00ef | 14 | 18.0 | 4→100% | 23 | Yes (ep 11) |
 
-| # | Experiment | best_cost | avg_cost | avg_steps | gate_frac | pi_entropy | root_val |
-|---|-----------|-----------|----------|-----------|-----------|------------|----------|
-| 1 | Value fix only | | | | | | |
-| 2 | + lw>cw | | | | | | |
-| 3 | + pretrain | | | | | | |
-| 4 | + aux loss | | | | | | |
-| 5 | Scaled | | | | | | |
-| 6 | + gate_only | | | | | | |
+### Key findings
+
+1. **The value range fix is THE critical change.** Widening [-10,10] → [-25,25] alone prevents policy collapse and enables gradual learning. Exp 1 (no pretrain, no weight tuning) achieves avg_cost=17.5 — first time below the trivial 18.
+
+2. **Pretraining and weight tuning were counterproductive.** Pretraining gets overwritten by TD in 1-2 epochs. The `lw > cw` weighting amplifies noisy latency estimates in early epochs. The aux loss and freeze delay collapse but don't prevent it.
+
+3. **The network IS learning (Exp 1).** best_cost steadily improves: 27→22→19→18→17→16→14 over 30 epochs. This is genuine policy improvement, not just lucky search.
+
+4. **Why the range matters:** With [-10,10], correctness targets (~18) clamp to 10 and latency targets (~-18) clamp to -10. Both heads see a constant target → no gradient signal → value heads are useless → MCTS degrades to random exploration → policy collapses to first strong pattern (execute). With [-25,25], the latency head learns to distinguish cost=14 from cost=18, providing genuine quality signal to MCTS.
+
+### Next steps
+
+- **Scale up Exp 1 config** (more sims, more games, more epochs) — the learning curve hasn't plateaued
+- **Test on Map 0 and Map 2** — verify the fix generalizes
+- **Random baseline** — run FakeNet with many games to confirm the network adds value
+- **Investigate cost=14 solutions** — understand what reconfiguration was discovered

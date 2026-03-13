@@ -76,6 +76,7 @@ def get_config():
     c.training.pretrain_value_steps = 0
     c.training.aux_value_weight = 0.0
     c.training.aux_value_samples = 512
+    c.training.freeze_value_epochs = 0
 
     c.experiment = ml_collections.ConfigDict()
     c.experiment.output_dir = './outputs'

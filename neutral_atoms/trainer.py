@@ -140,7 +140,7 @@ class AlphaAtomsTrainer:
         }, batch_size=len(game.history))
         self.replay_buffer.extend(observations)
 
-    def fit(self):
+    def fit(self, epoch=0):
         cfg = self.config.training
         if self.network.use_fake:
             print("  (FakeNet: skipping training)")
@@ -151,6 +151,12 @@ class AlphaAtomsTrainer:
 
         self._setup_fabric()
         fabric, model, optimizer = self._fabric, self._model, self._optimizer
+
+        freeze_value = epoch < cfg.freeze_value_epochs
+        if freeze_value:
+            for p in model.nnet.value_net.parameters():
+                p.requires_grad_(False)
+            print(f"  (value head frozen, epoch {epoch+1}/{cfg.freeze_value_epochs})")
 
         aux_weight = cfg.aux_value_weight
         aux_features, aux_costs = None, None
@@ -189,6 +195,10 @@ class AlphaAtomsTrainer:
                       f"(pi={last_losses['policy']:.3f} "
                       f"cv={last_losses['correctness']:.3f} "
                       f"lv={last_losses['latency']:.3f})")
+
+        if freeze_value:
+            for p in model.nnet.value_net.parameters():
+                p.requires_grad_(True)
 
         model.eval()
         return last_losses
