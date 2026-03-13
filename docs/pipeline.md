@@ -31,7 +31,8 @@ Given a grid of neutral atoms and a sequence of quantum gate layers (each layer 
 │  └─────────────┘    └──────────────────┘    └────────────────────────┘   │
 │                                                                          │
 │  × num_selfplay       LazyTensorStorage       × training_steps           │
-│    games/epoch         (capacity: 1000)          per epoch                │
+│    games/epoch         (capacity: buffer_size)   per epoch                │
+│  (parallel: num_parallel_games workers)                                   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -48,8 +49,9 @@ For each game:
    - Repeat for `num_simulations` iterations
 3. **Action selection**: Sample from visit count distribution (softmax with temperature)
 4. **Step environment**: Execute chosen action (move atom or execute gate layer)
-5. **Store statistics**: Visit count distribution (policy target) and root value
-6. **Repeat** until done or budget exhausted
+5. **Cache observation**: Store `make_features` output to avoid O(N²) replay later
+6. **Store statistics**: Visit count distribution (policy target) and root value
+7. **Repeat** until done or budget exhausted
 
 ```
 Environment state ──▶ make_features() ──▶ Network.inference()
@@ -95,9 +97,10 @@ correctness  latency        │
    over value bins
 ```
 
-- **Value head**: Outputs categorical distributions over `num_bins` bins (not scalar). Converted to scalar via expectation (`logits2values`).
+- **Value head**: Outputs categorical distributions over `num_bins` bins (not scalar). Converted to scalar via expectation (`logits2values`). Combined value = `correctness_weight * correctness + latency_weight * latency`.
 - **Policy head**: One logit for "execute gate" action + `num_qubits × board_size` logits for move actions.
 - **Target network**: EMA shadow copy of the real network, used for bootstrap value estimation during training.
+- **Value encoding**: Targets use two-hot encoding (`scalar_to_two_hot`) — linear interpolation between adjacent bins for smooth gradient flow.
 
 ### Training phase (trainer.py: fit)
 
@@ -133,7 +136,16 @@ reward = (prev_cost - curr_cost) × reward_scale
        + (prev_entropy - curr_entropy) × entropy_weight
 ```
 
-Where `cost` = total parallel execution steps needed for all remaining gates given current atom positions. This provides dense reward: every move that improves future parallelism is immediately rewarded.
+Where `cost` depends on the reward mode (`config.env.reward_mode`):
+
+| Mode | Cost function | Effect |
+|------|--------------|--------|
+| `cost_delta` (default) | Full cost: reconfig groups + gate groups | Dense but penalizes reconfig moves for adding groups |
+| `gate_only` | Only gate parallelism cost (reconfig = free) | Reconfig moves judged purely on gate improvement |
+| `conflict_count` | Pairwise incompatible gate-move conflicts | More fine-grained than integer group count |
+| `manhattan` | Sum of Manhattan distances between gate partners | Perfectly continuous proxy |
+
+The real total cost (`_cached_cost`) is always tracked for metrics/early-stopping regardless of reward mode. This provides dense reward: every move that improves future parallelism is immediately rewarded.
 
 ### Action space (env.py)
 
@@ -152,6 +164,7 @@ config
 ├── use_fake         # Use FakeNet for testing
 ├── env
 │   ├── budget, entropy_weight, reward_scale
+│   ├── reward_mode                            (cost_delta|gate_only|conflict_count|manhattan)
 │   └── board_height, board_width, num_qubits  (derived from map)
 ├── mcts
 │   ├── num_simulations, discount, max_moves
@@ -163,6 +176,8 @@ config
 │   ├── batch_size, lr, grad_norm_clip
 │   ├── buffer_size, td_steps
 │   ├── log_interval
+│   ├── policy_entropy_weight, policy_target_temperature
+│   ├── num_parallel_games                     (forkserver workers for self-play)
 │   └── accelerator, devices, seed
 ├── experiment
 │   ├── output_dir                             (default: ./outputs)
@@ -171,6 +186,7 @@ config
 └── network
     ├── v_hsize, p_hsize, mlp_depth
     ├── ema_decay, num_bins, value_min, value_max
+    ├── correctness_weight, latency_weight             (value head loss/inference weighting)
     └── num_tasks, num_qubits, board_size, num_actions  (derived from map)
 ```
 
@@ -185,7 +201,8 @@ outputs/
     │   ├── epoch_010.ckpt          # periodic (every checkpoint_every_n_epochs)
     │   └── final.ckpt              # always saved at end
     └── solutions/
-        └── best.json               # atom-viz compatible (board + circuit + plan)
+        ├── best.json               # atom-viz compatible (board + circuit + plan)
+        └── best_trace.json         # per-step trace (action, cost before/after, reward)
 ```
 
 **Total cost** = reconfig parallel groups + gate execution groups (2x per layer for AOD enter/exit).
