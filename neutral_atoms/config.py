@@ -87,7 +87,7 @@ def get_config():
     c.network.value_min = -10.0
     c.network.value_max = 10.0
     c.network.correctness_weight = 1.0
-    c.network.latency_weight = 1.0
+    c.network.latency_weight = 0.1
 
     return c
 

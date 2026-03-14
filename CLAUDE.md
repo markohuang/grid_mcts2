@@ -96,7 +96,8 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 - `NeutralAtomsMLP2` = `ValueNetwork` + `PolicyNetwork`, both using MLPMixer blocks.
 - Input features: `(batch, num_tasks+1, board_size, num_qubits)` — slot 0 is board state, slots 1..N encode gate pair indicators. Qubit identity is injected after mixer1 in both ValueNetwork and PolicyNetwork via deterministic sinusoidal embeddings `(nqubits, dim)`, analogous to positional encodings in transformers.
 - `PolicyNetwork` outputs `(batch, num_qubits, board_size)` — per-qubit policy logits. At inference, the current qubit's slice is selected. During training, batched `current_qubit` indices are used for gather.
-- Value head outputs categorical distributions over bins (not scalar values). `logits2values()` converts via expectation.
+- Two value heads (AlphaDev-style): **correctness** (parallel group cost, TD return from dense reward) and **latency** (total move distance, terminal reward normalized by episode length). `correctness_weight=1.0`, `latency_weight=0.1` (tiebreaker for decoherence).
+- Value heads output categorical distributions over bins (not scalar values). `logits2values()` converts via expectation.
 - Target network uses EMA (`t_nnet`) with `average_parameters()` context manager for bootstrap value computation.
 
 ### Environment (`env.py`, `board.py`, `moves.py`, `rewards.py`)
@@ -104,6 +105,7 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 - Actions: cell index (0..board_size-1) — where to place the current qubit
 - Reward is dense: every step compares current-layer cost before vs after the action (computed before auto-execute). Uses current layer only (not all remaining layers) to break the telescoping sum that made cumulative reward constant.
 - `compute_reward(prev_cost, curr_cost, reward_scale) -> float`
+- Env tracks `total_move_distance` (Manhattan distance of all moves) — used for latency value target at terminal.
 - Parallel grouping uses the AOD constraint: two atom moves can execute simultaneously only if they don't cross in rows or columns. Implemented as vectorized pairwise compatibility check + greedy graph coloring.
 
 ### MCTS (`mcts.py`)

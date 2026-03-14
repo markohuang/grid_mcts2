@@ -32,6 +32,7 @@ class NeutralAtomsEnv:
         self.tasks_done = 0
         self.current_atom_idx = 0
         self.current_phase_moves = []
+        self.total_move_distance = 0
         self._cached_cost = compute_total_cost(
             self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
         )
@@ -60,6 +61,9 @@ class NeutralAtomsEnv:
                         self.atom_positions[qubit_idx][1]).item()
 
         if action != current_flat:
+            dst_row, dst_col = action // self.board_width, action % self.board_width
+            src_row, src_col = self.atom_positions[qubit_idx].tolist()
+            self.total_move_distance += abs(dst_row - src_row) + abs(dst_col - src_col)
             self.board, self.atom_positions, move = move_qubit_to_cell(
                 self.board, self.atom_positions, qubit_idx, action, self.board_width
             )
@@ -94,7 +98,8 @@ class NeutralAtomsEnv:
             done=done,
             info={'cost': self._cached_cost, 'tasks_done': self.tasks_done,
                   'cost_lb': self.cost_lb, 'cost_ub': self.cost_ub,
-                  'current_qubit': self.current_qubit}
+                  'current_qubit': self.current_qubit,
+                  'total_move_distance': self.total_move_distance}
         )
 
     def _get_observation(self) -> dict:
@@ -125,6 +130,7 @@ class NeutralAtomsEnv:
         new_env.tasks_done = self.tasks_done
         new_env.current_atom_idx = self.current_atom_idx
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
+        new_env.total_move_distance = self.total_move_distance
         new_env._cached_cost = self._cached_cost
         new_env._current_layer_cost = self._current_layer_cost
         return new_env

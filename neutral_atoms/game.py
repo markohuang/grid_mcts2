@@ -45,7 +45,9 @@ class Game:
         self.done = result.done
         self.last_info = result.info
         if self.done and result.info.get('tasks_done', 0) >= len(self.tasks):
-            self.latency_reward = -result.info.get('cost', 0.0)
+            move_dist = result.info.get('total_move_distance', 0.0)
+            # Normalize by episode length so latency target fits in value bins
+            self.latency_reward = -move_dist / max(len(self.history), 1)
 
     def store_search_statistics(self, root):
         tau = self.policy_target_temperature
