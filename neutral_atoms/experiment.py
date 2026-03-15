@@ -136,7 +136,8 @@ def log_game_trace(game, run_dir, label='best'):
         qubit_idx = env.current_qubit
         current_flat = (env.atom_positions[qubit_idx][0] * board_width +
                         env.atom_positions[qubit_idx][1]).item()
-        entry = {'step': step_idx, 'action': action, 'qubit': qubit_idx}
+        layer_before = env.tasks_done
+        entry = {'step': step_idx, 'action': action, 'qubit': qubit_idx, 'layer': layer_before}
         if action == current_flat:
             entry['action_type'] = 'noop'
         else:
@@ -144,7 +145,6 @@ def log_game_trace(game, run_dir, label='best'):
             entry['action_type'] = 'move'
             entry['src'] = src
             entry['dst'] = [action // board_width, action % board_width]
-        layer_before = env.tasks_done
         result = env.step(action)
         entry['cost_before'] = cost_before
         entry['cost_after'] = env._cached_cost
