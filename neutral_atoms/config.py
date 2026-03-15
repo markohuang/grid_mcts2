@@ -29,6 +29,18 @@ MAPS = [
             [[0, 1], [2, 3], [6, 5], [9, 8]],
         ],
     },
+    {   # 8x8 with 20 atoms (fixed seed for reproducibility)
+        'board_dim': (8, 8), 'num_qubits': 20,
+        'atom_map': None,  # generated via map_generator
+        'tasks': None,
+        '_generator': {'seed': 42, 'num_layers': 5, 'gates_per_layer': 10},
+    },
+    {   # 8x8 with 30 atoms
+        'board_dim': (8, 8), 'num_qubits': 30,
+        'atom_map': None,
+        'tasks': None,
+        '_generator': {'seed': 42, 'num_layers': 5, 'gates_per_layer': 15},
+    },
 ]
 
 
@@ -40,6 +52,8 @@ def get_config():
     c = ml_collections.ConfigDict()
     c.map_num = 0
     c.use_fake = False
+    c.random_board = False  # if True, generate random board each game
+    c.random_board_seed = -1  # -1 = different seed each game
 
     c.env = ml_collections.ConfigDict()
     c.env.reward_scale = 1.0
@@ -92,8 +106,20 @@ def get_config():
     return c
 
 
+def _resolve_map(m):
+    if m.get('atom_map') is not None:
+        return m
+    from .map_generator import generate_random_map
+    gen = m['_generator']
+    generated = generate_random_map(
+        m['board_dim'], m['num_qubits'], gen['num_layers'],
+        gates_per_layer=gen.get('gates_per_layer'), seed=gen['seed'],
+    )
+    return generated
+
+
 def set_derived_config(config):
-    m = MAPS[config.map_num]
+    m = _resolve_map(MAPS[config.map_num])
     board_h, board_w = m['board_dim']
     num_qubits = m['num_qubits']
     board_size = board_h * board_w
@@ -105,3 +131,8 @@ def set_derived_config(config):
         config.network.num_qubits = num_qubits
         config.network.board_size = board_size
         config.network.num_actions = board_size
+
+
+def get_map_data(config):
+    m = _resolve_map(MAPS[config.map_num])
+    return m

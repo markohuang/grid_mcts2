@@ -182,7 +182,7 @@ class TestLayerLevelMDP:
                             env.atom_positions[current_q][1]).item()
             env.step(current_flat)
         assert env.tasks_done == len(tasks)
-        assert env._cached_cost >= 0
+        assert env._get_total_cost() >= 0
 
     def test_layer_auto_advances(self):
         env, tasks = _make_env(map_num=1)

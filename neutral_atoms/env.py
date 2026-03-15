@@ -33,12 +33,11 @@ class NeutralAtomsEnv:
         self.current_atom_idx = 0
         self.current_phase_moves = []
         self.total_move_distance = 0
-        self._cached_cost = compute_total_cost(
-            self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
-        )
         self._current_layer_cost = compute_current_layer_cost(
             self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
         )
+        self._cost_dirty = True  # lazy compute _cached_cost only when needed
+        self._cached_cost = None
         return self._get_observation()
 
     @property
@@ -53,6 +52,14 @@ class NeutralAtomsEnv:
         if self.current_atom_idx < len(atoms):
             return atoms[self.current_atom_idx]
         return -1
+
+    def _get_total_cost(self):
+        if self._cost_dirty:
+            self._cached_cost = compute_total_cost(
+                self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
+            )
+            self._cost_dirty = False
+        return self._cached_cost
 
     def step(self, action: int) -> StepResult:
         prev_layer_cost = self._current_layer_cost
@@ -83,20 +90,21 @@ class NeutralAtomsEnv:
             self.tasks_done += 1
             self.current_atom_idx = 0
             self.current_phase_moves = []
+            # Need to recompute layer cost for new layer
+            self._current_layer_cost = compute_current_layer_cost(
+                self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
+            )
+        else:
+            self._current_layer_cost = curr_layer_cost
 
-        self._cached_cost = compute_total_cost(
-            self.board, self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
-        )
-        self._current_layer_cost = compute_current_layer_cost(
-            self.atom_positions, self.tasks, self.tasks_done, self.current_phase_moves
-        )
+        self._cost_dirty = True  # defer total cost computation until needed
         done = is_episode_done(self.tasks_done, self.num_tasks)
 
         return StepResult(
             observation=self._get_observation(),
             reward=reward,
             done=done,
-            info={'cost': self._cached_cost, 'tasks_done': self.tasks_done,
+            info={'tasks_done': self.tasks_done,
                   'cost_lb': self.cost_lb, 'cost_ub': self.cost_ub,
                   'current_qubit': self.current_qubit,
                   'total_move_distance': self.total_move_distance}
@@ -131,8 +139,9 @@ class NeutralAtomsEnv:
         new_env.current_atom_idx = self.current_atom_idx
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
         new_env.total_move_distance = self.total_move_distance
-        new_env._cached_cost = self._cached_cost
         new_env._current_layer_cost = self._current_layer_cost
+        new_env._cost_dirty = True
+        new_env._cached_cost = None
         return new_env
 
     def state_hash(self) -> int:
@@ -147,7 +156,7 @@ class NeutralAtomsEnv:
             'current_qubit': self.current_qubit,
             'current_atom_idx': self.current_atom_idx,
             'actions': self.actions,
-            'cost': self._cached_cost,
+            'cost': self._get_total_cost(),
             'legal_actions': self.legal_actions(),
             'done': is_episode_done(self.tasks_done, self.num_tasks),
         }

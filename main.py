@@ -3,7 +3,7 @@ import time
 from absl import app
 from ml_collections import config_flags
 
-from neutral_atoms.config import get_config, MAPS, atom_map_to_positions, set_derived_config
+from neutral_atoms.config import get_config, MAPS, atom_map_to_positions, set_derived_config, get_map_data
 from neutral_atoms.network import Network
 from neutral_atoms.trainer import AlphaAtomsTrainer
 from neutral_atoms.experiment import (
@@ -41,7 +41,7 @@ def format_selfplay_summary(sp_metrics):
 def main(_):
     config = _CONFIG.value
     set_derived_config(config)
-    map_data = MAPS[config.map_num]
+    map_data = get_map_data(config)
     tasks = map_data['tasks']
     initial_positions = atom_map_to_positions(map_data['atom_map'], config.env.board_width)
 

@@ -105,7 +105,7 @@ def log_game_trace(game, run_dir, label='best'):
     board_width = game.env_config.board_width
     trace = []
     for step_idx, action in enumerate(game.history):
-        cost_before = env._cached_cost
+        cost_before = env._get_total_cost()
         qubit_idx = env.current_qubit
         current_flat = (env.atom_positions[qubit_idx][0] * board_width +
                         env.atom_positions[qubit_idx][1]).item()
@@ -120,7 +120,7 @@ def log_game_trace(game, run_dir, label='best'):
             entry['dst'] = [action // board_width, action % board_width]
         result = env.step(action)
         entry['cost_before'] = cost_before
-        entry['cost_after'] = env._cached_cost
+        entry['cost_after'] = env._get_total_cost()
         entry['reward'] = result.reward
         entry['tasks_done'] = env.tasks_done
         if env.tasks_done > layer_before:
