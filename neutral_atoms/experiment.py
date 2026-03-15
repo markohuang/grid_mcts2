@@ -7,7 +7,7 @@ import torch
 
 from .env import NeutralAtomsEnv
 from .tasks import gates_to_moves, get_relevant_atoms
-from .moves import parallel_groups, count_groups
+from .moves import count_groups
 
 
 def create_run_dir(config):
@@ -52,10 +52,9 @@ def game_to_solution(game):
     env = NeutralAtomsEnv(game.tasks, game.initial_positions, game.env_config)
     env.reset()
     board_width = game.env_config.board_width
-    plan = []
+    # plan[layer_idx] = list of moves for that layer (atom-viz does its own grouping)
+    plan = [[] for _ in game.tasks]
     current_layer_moves = []
-    current_layer_tensors = []
-    prev_layer = 0
 
     for action in game.history:
         qubit_idx = env.current_qubit
@@ -65,26 +64,18 @@ def game_to_solution(game):
 
         if action != current_flat:
             src = env.atom_positions[qubit_idx].tolist()
-
-        result = env.step(action)
-        layer_after = env.tasks_done
-
-        if action != current_flat:
-            dst = env.atom_positions[qubit_idx].tolist() if layer_after == layer_before else src
-            # If layer advanced, the atom was placed before auto-execute
-            # Reconstruct dst from action
             dst_row, dst_col = action // board_width, action % board_width
-            current_layer_moves.append((qubit_idx, src, [dst_row, dst_col]))
-            move_tensor = torch.tensor([src[0], src[1], dst_row, dst_col], dtype=torch.long)
-            current_layer_tensors.append(move_tensor)
+            current_layer_moves.append({
+                'atom': qubit_idx,
+                'from': {'row': src[0], 'col': src[1]},
+                'to': {'row': dst_row, 'col': dst_col},
+            })
 
-        if layer_after > layer_before:
-            # Layer auto-executed, flush moves
-            plan.extend(_group_phase_moves(current_layer_moves, current_layer_tensors))
+        env.step(action)
+
+        if env.tasks_done > layer_before:
+            plan[layer_before] = current_layer_moves
             current_layer_moves = []
-            current_layer_tensors = []
-
-    plan.extend(_group_phase_moves(current_layer_moves, current_layer_tensors))
 
     initial_atoms = {
         str(i): {'row': r, 'col': c}
@@ -99,24 +90,6 @@ def game_to_solution(game):
         'circuit': game.tasks,
         'plan': plan,
     }
-
-
-def _group_phase_moves(phase_moves, phase_tensors):
-    if not phase_moves:
-        return []
-    groups = parallel_groups(torch.stack(phase_tensors), canonicalize=True)
-    result = []
-    for g in range(groups.max().item() + 1):
-        group_entries = []
-        for i, (atom, src, dst) in enumerate(phase_moves):
-            if groups[i].item() == g:
-                group_entries.append({
-                    'atom': atom,
-                    'from': {'row': src[0], 'col': src[1]},
-                    'to': {'row': dst[0], 'col': dst[1]},
-                })
-        result.append(group_entries)
-    return result
 
 
 def save_solution(game, path):
