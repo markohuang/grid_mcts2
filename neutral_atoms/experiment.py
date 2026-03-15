@@ -132,8 +132,8 @@ def log_game_trace(game, run_dir, label='best'):
     return trace
 
 
-def selfplay_metrics(games, num_tasks):
-    completed = [g for g in games if g.last_info.get('tasks_done', 0) >= num_tasks]
+def selfplay_metrics(games):
+    completed = [g for g in games if g.last_info.get('tasks_done', 0) >= len(g.tasks)]
     metrics = {
         'completion_rate': len(completed) / len(games),
         'avg_steps': sum(len(g.history) for g in games) / len(games),

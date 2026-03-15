@@ -66,7 +66,7 @@ def main(_):
         t0 = time.time()
         games = trainer.run_selfplay()
         selfplay_time = time.time() - t0
-        sp_metrics = selfplay_metrics(games, len(tasks))
+        sp_metrics = selfplay_metrics(games)
         print(f"  >> {format_selfplay_summary(sp_metrics)} [{selfplay_time:.1f}s]")
 
         if 'best_cost' in sp_metrics:

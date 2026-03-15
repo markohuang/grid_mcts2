@@ -7,6 +7,7 @@ from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 from .game import Game
 from .mcts import play_game
 from .network import Network
+from .augmentation import augment_features_and_policy
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake):
@@ -30,6 +31,8 @@ class AlphaAtomsTrainer:
         self.config = config
         self.tasks = tasks
         self.initial_positions = initial_positions
+        self.board_h = config.env.board_height
+        self.board_w = config.env.board_width
         self.replay_buffer = TensorDictReplayBuffer(
             storage=LazyTensorStorage(config.training.buffer_size)
         )
@@ -59,6 +62,24 @@ class AlphaAtomsTrainer:
             )
         return self._pool
 
+    def _get_game_instance(self):
+        if self.config.random_board:
+            from .map_generator import generate_random_map
+            from .config import atom_map_to_positions
+            seed = self.config.random_board_seed
+            if seed < 0:
+                seed = None  # truly random
+            m = generate_random_map(
+                (self.board_h, self.board_w),
+                self.config.env.num_qubits,
+                self.config.network.num_tasks,
+                seed=seed,
+            )
+            tasks = m['tasks']
+            ip = atom_map_to_positions(m['atom_map'], self.board_w)
+            return tasks, ip
+        return self.tasks, self.initial_positions
+
     def run_selfplay(self):
         self.network.eval()
         num_games = self.config.training.num_selfplay
@@ -77,14 +98,15 @@ class AlphaAtomsTrainer:
         torch.set_num_threads(1)
         games = []
         for idx in range(num_games):
-            game = Game(self.config, self.tasks, self.initial_positions)
+            tasks, ip = self._get_game_instance()
+            game = Game(self.config, tasks, ip)
             game = play_game(game, self.config.mcts, self.network)
             self.save_game(game)
             games.append(game)
             tasks_done = game.last_info.get('tasks_done', 0)
             print(f"  game {idx+1}/{num_games}: "
                   f"{len(game.history)} steps, "
-                  f"tasks_done={tasks_done}/{len(self.tasks)}")
+                  f"tasks_done={tasks_done}/{len(tasks)}")
         torch.set_num_threads(prev_threads)
         return games
 
@@ -95,11 +117,13 @@ class AlphaAtomsTrainer:
         use_fake = self.network.use_fake
 
         pool = self._get_pool(num_parallel)
-        futures = [
-            pool.submit(_play_single_game, state_dict, config_dict, self.tasks,
-                        self.initial_positions, network_config_dict, use_fake)
-            for _ in range(num_games)
-        ]
+        futures = []
+        for _ in range(num_games):
+            tasks, ip = self._get_game_instance()
+            futures.append(
+                pool.submit(_play_single_game, state_dict, config_dict, tasks,
+                            ip, network_config_dict, use_fake)
+            )
 
         games = []
         for idx, future in enumerate(futures):
@@ -109,7 +133,7 @@ class AlphaAtomsTrainer:
             tasks_done = game.last_info.get('tasks_done', 0)
             print(f"  game {idx+1}/{num_games}: "
                   f"{len(game.history)} steps, "
-                  f"tasks_done={tasks_done}/{len(self.tasks)}")
+                  f"tasks_done={tasks_done}/{len(game.tasks)}")
         return games
 
     def save_game(self, game):
@@ -156,6 +180,15 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
+            # Apply random spatial augmentation
+            aug_feat, aug_pi = augment_features_and_policy(
+                batch['obs']['features'], batch['target']['policies'],
+                self.board_h, self.board_w,
+            )
+            batch['obs']['features'] = aug_feat
+            batch['target']['policies'] = aug_pi
+            # Also augment bootstrap features with same transform would be ideal,
+            # but they're independent samples — random aug is fine
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
