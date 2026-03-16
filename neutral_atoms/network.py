@@ -333,23 +333,12 @@ class Network(nn.Module):
         cw, lw = self.cfg.correctness_weight, self.cfg.latency_weight
         total = (policy_loss + cw * correctness_loss + lw * latency_loss).mean()
 
-        losses = {
+        return {
             'total': total,
             'policy': policy_loss.mean().item(),
             'correctness': correctness_loss.mean().item(),
             'latency': latency_loss.mean().item(),
         }
-
-        # Auxiliary value loss: supervised cost prediction
-        if 'aux_features' in batch:
-            aux_pred = self.inference({'features': batch['aux_features']})
-            aux_cv = self.logits2values(aux_pred.correctness_value_logits)
-            aux_target = batch['aux_cost'].clip(self.cfg.value_min, self.cfg.value_max)
-            aux_loss = F.mse_loss(aux_cv, aux_target)
-            losses['total'] = losses['total'] + cw * aux_loss
-            losses['aux'] = aux_loss.item()
-
-        return losses
 
     def logits2values(self, logits):
         return (torch.exp(logits) @ self.categories).squeeze(-1)
