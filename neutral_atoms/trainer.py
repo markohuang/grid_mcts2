@@ -66,13 +66,19 @@ class AlphaAtomsTrainer:
         if self.config.random_board:
             from .map_generator import generate_random_map
             from .config import atom_map_to_positions
+            import random
             seed = self.config.random_board_seed
             if seed < 0:
                 seed = None  # truly random
+            # Curriculum: vary gates_per_layer for mixed difficulty
+            num_qubits = self.config.env.num_qubits
+            max_gates = num_qubits // 2
+            gates_per_layer = random.randint(max(2, max_gates // 3), max_gates)
             m = generate_random_map(
                 (self.board_h, self.board_w),
-                self.config.env.num_qubits,
+                num_qubits,
                 self.config.network.num_tasks,
+                gates_per_layer=gates_per_layer,
                 seed=seed,
             )
             tasks = m['tasks']
@@ -187,8 +193,10 @@ class AlphaAtomsTrainer:
             )
             batch['obs']['features'] = aug_feat
             batch['target']['policies'] = aug_pi
-            # Also augment bootstrap features with same transform would be ideal,
-            # but they're independent samples — random aug is fine
+            # Inject auxiliary value supervision from random board states
+            aux_features, aux_costs = self._generate_aux_value_batch(cfg.batch_size, fabric.device)
+            batch['aux_features'] = aux_features
+            batch['aux_cost'] = aux_costs
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
@@ -199,14 +207,49 @@ class AlphaAtomsTrainer:
             last_losses = {k: (v.item() if hasattr(v, 'item') else v) for k, v in losses.items()}
 
             if (iteration + 1) % cfg.log_interval == 0:
+                aux_str = f" aux={last_losses.get('aux', 0):.3f}" if 'aux' in last_losses else ""
                 print(f"  step {iteration+1}/{cfg.training_steps}, "
                       f"loss: {last_losses['total']:.4f} "
                       f"(pi={last_losses['policy']:.3f} "
                       f"cv={last_losses['correctness']:.3f} "
-                      f"lv={last_losses['latency']:.3f})")
+                      f"lv={last_losses['latency']:.3f}{aux_str})")
 
         model.eval()
         return last_losses
+
+    def _generate_aux_value_batch(self, batch_size, device):
+        from .map_generator import generate_random_map
+        from .config import atom_map_to_positions
+        from .env import NeutralAtomsEnv
+        from .network import make_features
+        import random
+        features_list, costs_list = [], []
+        num_qubits = self.config.env.num_qubits
+        num_tasks = self.config.network.num_tasks
+        for _ in range(batch_size):
+            gates_per_layer = random.randint(2, num_qubits // 2)
+            m = generate_random_map(
+                (self.board_h, self.board_w), num_qubits, num_tasks,
+                gates_per_layer=gates_per_layer,
+            )
+            ip = atom_map_to_positions(m['atom_map'], self.board_w)
+            env = NeutralAtomsEnv(m['tasks'], ip, self.config.env)
+            env.reset()
+            # Random partial progress: step through some random actions
+            n_steps = random.randint(0, env.episode_length // 2)
+            for _ in range(n_steps):
+                if env.tasks_done >= env.num_tasks:
+                    break
+                legal = env.legal_actions()
+                env.step(random.choice(legal))
+            obs = env._get_observation()
+            feat = make_features(obs, m['tasks'])
+            cost = env._current_layer_cost
+            features_list.append(feat.float())
+            # Negate (lower cost = better = higher value) and scale to fit value bins
+            costs_list.append(-float(cost))
+        return (torch.stack(features_list).to(device),
+                torch.tensor(costs_list, dtype=torch.float32, device=device))
 
     def save_checkpoint(self, path):
         if self.network.use_fake:
