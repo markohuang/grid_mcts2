@@ -7,8 +7,8 @@ from neutral_atoms.config import get_config, MAPS, atom_map_to_positions, set_de
 from neutral_atoms.network import Network
 from neutral_atoms.trainer import AlphaAtomsTrainer
 from neutral_atoms.experiment import (
-    create_run_dir, selfplay_metrics, save_solution, log_game_trace,
-    append_epoch_metrics, append_to_registry,
+    create_run_dir, selfplay_metrics, compute_solution_cost, save_solution,
+    log_game_trace, append_epoch_metrics, append_to_registry,
 )
 
 _CONFIG = config_flags.DEFINE_config_dict('config', get_config())
@@ -54,9 +54,14 @@ def main(_):
     trainer = AlphaAtomsTrainer(network, config, tasks, initial_positions)
 
     best_cost, best_game = float('inf'), None
+    eval_best_cost = float('inf')
     no_improve_count = 0
     run_metrics = {}
     epochs_completed = 0
+
+    # Fixed evaluation instance (always Map 3 regardless of training distribution)
+    eval_tasks = tasks
+    eval_positions = initial_positions
 
     for epoch in range(config.training.epochs):
         epochs_completed = epoch + 1
@@ -73,9 +78,25 @@ def main(_):
             if sp_metrics['best_cost'] < best_cost:
                 best_cost = sp_metrics['best_cost']
                 best_game = sp_metrics['best_game']
-                no_improve_count = 0
-            else:
-                no_improve_count += 1
+
+        # Evaluate on fixed map (5 games, no noise)
+        from neutral_atoms.game import Game
+        from neutral_atoms.mcts import play_game
+        trainer.network.eval()
+        eval_costs = []
+        for _ in range(5):
+            eg = Game(config, eval_tasks, eval_positions)
+            eg = play_game(eg, config.mcts, trainer.network)
+            eval_costs.append(compute_solution_cost(eg))
+        eval_cost = min(eval_costs)
+        eval_avg = sum(eval_costs) / len(eval_costs)
+        if eval_cost < eval_best_cost:
+            eval_best_cost = eval_cost
+            best_game = eg  # save best eval game for solution export
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
+        print(f"  eval: best={eval_cost}, avg={eval_avg:.1f}, best_so_far={eval_best_cost}")
 
         print("Training:")
         t0 = time.time()
@@ -88,6 +109,9 @@ def main(_):
             'train_time': round(train_time, 2),
             **{k: v for k, v in sp_metrics.items() if k != 'best_game'},
             'best_cost_so_far': best_cost if best_cost < float('inf') else None,
+            'eval_best': eval_cost,
+            'eval_avg': round(eval_avg, 1),
+            'eval_best_so_far': eval_best_cost if eval_best_cost < float('inf') else None,
         }
         if train_result:
             epoch_metrics.update({f'train_{k}': v for k, v in train_result.items()})
@@ -109,10 +133,10 @@ def main(_):
     if best_game is not None:
         save_solution(best_game, os.path.join(run_dir, 'solutions', 'best.json'))
         log_game_trace(best_game, run_dir, label='best')
-        print(f"\nBest solution cost: {best_cost}")
+        print(f"\nBest eval cost: {eval_best_cost}")
 
     run_metrics.update({
-        'best_cost': best_cost if best_cost < float('inf') else None,
+        'best_cost': eval_best_cost if eval_best_cost < float('inf') else None,
         'avg_cost': sp_metrics.get('avg_cost'),
         'completion_rate': sp_metrics.get('completion_rate', 0),
         'epochs_completed': epochs_completed,
