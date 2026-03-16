@@ -183,6 +183,9 @@ class AlphaAtomsTrainer:
 
         model.train()
         last_losses = None
+        # Pre-generate aux value pool once per fit() call
+        aux_pool_features, aux_pool_costs = self._generate_aux_value_batch(cfg.batch_size * 4, fabric.device)
+        aux_pool_size = aux_pool_features.shape[0]
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
@@ -193,10 +196,10 @@ class AlphaAtomsTrainer:
             )
             batch['obs']['features'] = aug_feat
             batch['target']['policies'] = aug_pi
-            # Inject auxiliary value supervision from random board states
-            aux_features, aux_costs = self._generate_aux_value_batch(cfg.batch_size, fabric.device)
-            batch['aux_features'] = aux_features
-            batch['aux_cost'] = aux_costs
+            # Sample from pre-generated aux pool
+            aux_idx = torch.randint(aux_pool_size, (cfg.batch_size,))
+            batch['aux_features'] = aux_pool_features[aux_idx]
+            batch['aux_cost'] = aux_pool_costs[aux_idx]
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
