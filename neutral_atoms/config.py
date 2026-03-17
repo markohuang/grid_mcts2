@@ -74,7 +74,7 @@ def get_config():
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50
     c.training.num_selfplay = 20
-    c.training.buffer_size = 1000
+    c.training.buffer_size = 50000
     c.training.td_steps = 5
     c.training.batch_size = 128
     c.training.lr = 2e-4

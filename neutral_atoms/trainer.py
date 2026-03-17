@@ -185,21 +185,8 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
-            # Augment: same random spatial transform on primary + bootstrap + policy
-            from .augmentation import augment_features_and_policy, num_transforms
-            import random as _rng
-            t = _rng.randint(0, num_transforms(self.board_h, self.board_w) - 1)
-            aug_feat, aug_pi = augment_features_and_policy(
-                batch['obs']['features'], batch['target']['policies'],
-                self.board_h, self.board_w, transform=t,
-            )
-            aug_boot, _ = augment_features_and_policy(
-                batch['bootstrap_obs']['features'], batch['target']['policies'],
-                self.board_h, self.board_w, transform=t,
-            )
-            batch['obs']['features'] = aug_feat
-            batch['bootstrap_obs']['features'] = aug_boot
-            batch['target']['policies'] = aug_pi
+            # Spatial augmentation (disabled — needs per-sample transform, not per-batch)
+            # TODO: implement per-sample augmentation correctly
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
