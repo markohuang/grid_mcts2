@@ -83,16 +83,17 @@ def main(_):
         from neutral_atoms.game import Game
         from neutral_atoms.mcts import play_game
         trainer.network.eval()
-        eval_costs = []
+        eval_games, eval_costs = [], []
         for _ in range(5):
             eg = Game(config, eval_tasks, eval_positions)
             eg = play_game(eg, config.mcts, trainer.network)
+            eval_games.append(eg)
             eval_costs.append(compute_solution_cost(eg))
         eval_cost = min(eval_costs)
         eval_avg = sum(eval_costs) / len(eval_costs)
         if eval_cost < eval_best_cost:
             eval_best_cost = eval_cost
-            best_game = eg  # save best eval game for solution export
+            best_game = eval_games[eval_costs.index(eval_cost)]
             no_improve_count = 0
         else:
             no_improve_count += 1
