@@ -157,31 +157,16 @@ class AlphaAtomsTrainer:
             pis.append(target.policy)
             bvals.append(target.bootstrap_discount)
             current_qubits.append(obs.get('current_qubit', -1))
-        feat_tensor = torch.stack(features)
-        boot_tensor = torch.stack(bootstrap_features)
-        pi_tensor = torch.tensor(pis, dtype=torch.float32)
-        cval_tensor = torch.tensor(cvals, dtype=torch.float32)
-        lval_tensor = torch.tensor(lvals, dtype=torch.float32)
-        bval_tensor = torch.tensor(bvals, dtype=torch.float32)
-        qubit_tensor = torch.tensor(current_qubits, dtype=torch.long)
-        # Store original + augmented copies (same spatial transform per game)
-        from .augmentation import augment_features_and_policy, num_transforms
-        n_aug = num_transforms(self.board_h, self.board_w)
-        for t in range(n_aug):
-            aug_feat, aug_pi = augment_features_and_policy(
-                feat_tensor, pi_tensor, self.board_h, self.board_w, transform=t)
-            aug_boot, _ = augment_features_and_policy(
-                boot_tensor, pi_tensor, self.board_h, self.board_w, transform=t)
-            observations = TensorDict({
-                ('obs', 'features'): aug_feat,
-                ('obs', 'current_qubit'): qubit_tensor,
-                ('bootstrap_obs', 'features'): aug_boot,
-                ('target', 'correctness_values'): cval_tensor,
-                ('target', 'latency_values'): lval_tensor,
-                ('target', 'policies'): aug_pi,
-                ('target', 'bootstrap_discounts'): bval_tensor,
-            }, batch_size=len(game.history))
-            self.replay_buffer.extend(observations)
+        observations = TensorDict({
+            ('obs', 'features'): torch.stack(features),
+            ('obs', 'current_qubit'): torch.tensor(current_qubits, dtype=torch.long),
+            ('bootstrap_obs', 'features'): torch.stack(bootstrap_features),
+            ('target', 'correctness_values'): torch.tensor(cvals, dtype=torch.float32),
+            ('target', 'latency_values'): torch.tensor(lvals, dtype=torch.float32),
+            ('target', 'policies'): torch.tensor(pis, dtype=torch.float32),
+            ('target', 'bootstrap_discounts'): torch.tensor(bvals, dtype=torch.float32),
+        }, batch_size=len(game.history))
+        self.replay_buffer.extend(observations)
 
     def fit(self):
         cfg = self.config.training
@@ -200,6 +185,21 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
+            # Augment: same random spatial transform on primary + bootstrap + policy
+            from .augmentation import augment_features_and_policy, num_transforms
+            import random as _rng
+            t = _rng.randint(0, num_transforms(self.board_h, self.board_w) - 1)
+            aug_feat, aug_pi = augment_features_and_policy(
+                batch['obs']['features'], batch['target']['policies'],
+                self.board_h, self.board_w, transform=t,
+            )
+            aug_boot, _ = augment_features_and_policy(
+                batch['bootstrap_obs']['features'], batch['target']['policies'],
+                self.board_h, self.board_w, transform=t,
+            )
+            batch['obs']['features'] = aug_feat
+            batch['bootstrap_obs']['features'] = aug_boot
+            batch['target']['policies'] = aug_pi
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
