@@ -81,20 +81,27 @@ def play_game(game: Game, config, network: Network) -> Game:
 
 
 def run_mcts(config, root, history, network, min_max_stats, env):
+    total_depth = 0
+    total_nonzero_reward_sims = 0
     for _ in range(config.num_simulations):
         node = root
         search_path = [node]
         sim_env = env.clone()
+        sim_reward_sum = 0.0
 
         while node.expanded():
             action, node = _select_child(config, node, min_max_stats)
-            result = sim_env.step(action)
+            result = sim_env.step(action, skip_obs=True)
             search_path.append(node)
+            sim_reward_sum += result.reward
 
-        obs = sim_env._get_observation()
+        total_depth += len(search_path) - 1
+        if abs(sim_reward_sum) > 1e-6:
+            total_nonzero_reward_sims += 1
+
         obs_features = {
-            'features': make_features(obs, sim_env.tasks),
-            'current_qubit': obs.get('current_qubit', -1),
+            'features': sim_env.get_features(),
+            'current_qubit': sim_env.current_qubit,
         }
         with torch.no_grad():
             network_output = network.inference(obs_features, aslist=True)
@@ -103,6 +110,8 @@ def run_mcts(config, root, history, network, min_max_stats, env):
             search_path, network_output.value,
             config.discount, min_max_stats,
         )
+    root._mcts_avg_depth = total_depth / config.num_simulations
+    root._mcts_reward_frac = total_nonzero_reward_sims / config.num_simulations
 
 
 def _select_action(training_steps, node, config, action_space_size):

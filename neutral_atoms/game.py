@@ -30,7 +30,9 @@ class Game:
         self.last_info = {}
         self.latency_reward = 0.0
         self.observation_cache = []
-        self.current_qubit_cache = []  # track which qubit was active at each step
+        self.current_qubit_cache = []
+        self.mcts_depths = []
+        self.mcts_reward_fracs = []
 
     def terminal(self):
         return self.done or not self.environment.legal_actions()
@@ -67,6 +69,8 @@ class Game:
                 exp_visits.get(a, 0) / exp_sum for a in range(self.action_space_size)
             ])
         self.root_values.append(root.value())
+        self.mcts_depths.append(getattr(root, '_mcts_avg_depth', 0))
+        self.mcts_reward_fracs.append(getattr(root, '_mcts_reward_frac', 0))
 
     def cache_observation(self):
         obs = self.environment._get_observation()

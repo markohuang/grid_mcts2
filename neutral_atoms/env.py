@@ -18,6 +18,7 @@ class NeutralAtomsEnv:
         self.num_tasks = len(tasks)
         self.cost_lb, self.cost_ub = compute_cost_bounds(tasks)
         self.reward_scale = config.reward_scale
+        self.reward_mode = getattr(config, 'reward_mode', 'remaining_cost')
         self._precompute_relevant_atoms()
         self._precompute_gate_indicators()
         self.reset()
@@ -55,7 +56,9 @@ class NeutralAtomsEnv:
         self.current_phase_moves = []
         self.total_move_distance = 0
         self.num_moves = 0
-        self._cost_dirty = True  # lazy compute _cached_cost only when needed
+        self._cost_dirty = True
+        if self.reward_mode == 'layer_delta':
+            self._current_layer_cost = self._compute_layer_cost_fast()  # lazy compute _cached_cost only when needed
         self._cached_cost = None
         self._init_board_feat()
         return self._get_observation()
@@ -114,16 +117,30 @@ class NeutralAtomsEnv:
         self.actions.append(action)
         self.current_atom_idx += 1
 
-        # Option D: dense reward = -remaining_cost / episode_length
-        # Cross-layer signal, no telescoping, incentivizes early improvement
-        remaining_cost = self._compute_remaining_cost()
-        reward = -remaining_cost / self.episode_length * self.reward_scale
+        # Compute reward based on mode
+        if self.reward_mode == 'layer_delta':
+            # Option B: current-layer cost delta (dense, myopic)
+            curr_layer_cost = self._compute_layer_cost_fast()
+            reward = (self._current_layer_cost - curr_layer_cost) * self.reward_scale
+        elif self.reward_mode == 'remaining_cost':
+            # Option D: -remaining_cost / episode_length (dense, cross-layer)
+            reward = -self._compute_remaining_cost() / self.episode_length * self.reward_scale
+        else:
+            reward = 0.0  # Option C: computed below at layer completion
 
         # Auto-execute layer when all relevant atoms have been placed
         if self.current_atom_idx >= len(self.relevant_atoms):
+            if self.reward_mode == 'layer_completion':
+                # Option C: reward = -actual layer cost at completion
+                layer_cost = self._compute_layer_cost_fast()
+                reward = -layer_cost * self.reward_scale
             self.tasks_done += 1
             self.current_atom_idx = 0
             self.current_phase_moves = []
+            if self.reward_mode == 'layer_delta':
+                self._current_layer_cost = self._compute_layer_cost_fast()
+        elif self.reward_mode == 'layer_delta':
+            self._current_layer_cost = curr_layer_cost
 
         self._cost_dirty = True
         done = is_episode_done(self.tasks_done, self.num_tasks)
@@ -226,6 +243,9 @@ class NeutralAtomsEnv:
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
         new_env.total_move_distance = self.total_move_distance
         new_env.num_moves = self.num_moves
+        new_env.reward_mode = self.reward_mode
+        if self.reward_mode == 'layer_delta':
+            new_env._current_layer_cost = self._current_layer_cost
         new_env._cost_dirty = True
         new_env._cached_cost = None
         return new_env

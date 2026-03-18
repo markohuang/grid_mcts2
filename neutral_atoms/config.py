@@ -57,6 +57,7 @@ def get_config():
 
     c.env = ml_collections.ConfigDict()
     c.env.reward_scale = 1.0
+    c.env.reward_mode = 'remaining_cost'  # 'layer_delta', 'layer_completion', 'remaining_cost'
 
     c.mcts = ml_collections.ConfigDict()
     c.mcts.num_simulations = 50

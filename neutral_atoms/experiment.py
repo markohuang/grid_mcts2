@@ -157,6 +157,19 @@ def selfplay_metrics(games):
                 all_entropies.append(-sum(p * math.log(p) for p in probs))
     if all_entropies:
         metrics['avg_policy_entropy'] = sum(all_entropies) / len(all_entropies)
+    # MCTS diagnostics
+    all_depths = [d for g in games for d in g.mcts_depths]
+    all_reward_fracs = [f for g in games for f in g.mcts_reward_fracs]
+    if all_depths:
+        metrics['avg_mcts_depth'] = round(sum(all_depths) / len(all_depths), 1)
+    if all_reward_fracs:
+        metrics['mcts_reward_frac'] = round(sum(all_reward_fracs) / len(all_reward_fracs), 2)
+    # Reward stats
+    all_rewards = [r for g in games for r in g.rewards]
+    if all_rewards:
+        metrics['avg_reward'] = round(sum(all_rewards) / len(all_rewards), 3)
+        nonzero = [r for r in all_rewards if abs(r) > 1e-6]
+        metrics['reward_nonzero_frac'] = round(len(nonzero) / len(all_rewards), 2)
     return metrics
 
 
