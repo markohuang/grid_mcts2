@@ -205,3 +205,62 @@ Total reward across the episode = `Σ_layers -layer_cost = -actual_solution_cost
 | Dense signal? | Yes (every step) | Yes (every step) | Sparse (every ~8 steps) |
 | MCTS can distinguish? | No (as V improves) | Yes (within a layer) | Yes |
 | Value function role | Learn cost(s) → Q-values collapse | Learn within-layer future | Learn remaining solution cost |
+
+## Option D: Raw Remaining Cost as Reward
+
+```
+reward_t = -compute_total_cost(state_after_action) / episode_length
+```
+
+At every step, the agent receives the negative remaining cost (scaled). No delta, no layer-completion trigger.
+
+### Why it doesn't telescope
+
+```
+Total reward = Σ_t -C(s_t) / L
+
+This is NOT a telescoping sum. It's the integral of the cost curve.
+Different trajectories have different cost curves → different totals.
+```
+
+### What it incentivizes
+
+The agent is penalized at every step for the total remaining cost. An action that reduces C from 18 to 14 at step 1 saves penalty for all 23 remaining steps. This creates a strong incentive to **reduce cost early** and to make moves that benefit **all remaining layers** (since C includes all of them).
+
+### Cross-layer signal
+
+C(s) = compute_total_cost includes ALL remaining layers. Moving an atom to help layer 2 reduces C immediately, giving positive signal even if it slightly hurts the current layer. The all-layers view is the cross-layer signal we need.
+
+### MCTS Q-values don't collapse
+
+```
+Q(s, a) = -C(s') / L + V_D(s')
+V_D(s') = expected sum of -C(s_k) / L for remaining steps
+```
+
+V_D(s') depends on the trajectory from s', which depends on s'. Different actions → different s' → different V_D → Q-values differ. No cancellation.
+
+Compare with Option A (delta):
+```
+Q(s, a) = [C(s) - C(s')] + V_A(s')
+If V_A(s') = C(s'), then Q = C(s) - C(s') + C(s') = C(s) = same for all a
+```
+
+The key difference: Option A's reward and value CANCEL because they encode the same quantity with opposite signs. Option D's reward is -C(s') and value is the sum of future -C values — these don't cancel.
+
+### Practical considerations
+
+- **Scaling**: Raw rewards ≈ -18 per step, total ≈ -350. Need to scale by 1/episode_length and widen value bins (value_min ≈ -20).
+- **compute_total_cost is a heuristic**: It assumes "execute everything from current positions" — no future reconfigurations. As the agent learns better reconfigurations, C(s) underestimates the remaining cost improvement possible. But it's still informative as a signal.
+- **Computational cost**: compute_total_cost is called at every step (was previously optimized away by lazy evaluation). For Map 2 this is cheap (~0.3ms). For larger maps it could be a bottleneck.
+
+### Comparison table (updated)
+
+| Property | A (all-layers Δ) | B (layer Δ) | C (layer completion) | D (raw cost) |
+|---|---|---|---|---|
+| Telescopes? | Yes → constant | Within-layer | No | No |
+| Cross-layer? | Yes (useless) | No | Via value net | Yes (direct) |
+| Dense signal? | Every step | Every step | Every ~8 steps | Every step |
+| MCTS distinguishes? | No (Q collapse) | Yes (within-layer) | Yes | Yes |
+| Incentivizes early improvement? | No | No | Weakly | Strongly |
+| Needs accurate V? | Fatally (causes collapse) | Somewhat | Yes (carries cross-layer) | Somewhat |

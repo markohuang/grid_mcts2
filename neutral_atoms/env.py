@@ -114,12 +114,13 @@ class NeutralAtomsEnv:
         self.actions.append(action)
         self.current_atom_idx += 1
 
-        # Option C: reward only at layer completion
-        reward = 0.0
+        # Option D: dense reward = -remaining_cost / episode_length
+        # Cross-layer signal, no telescoping, incentivizes early improvement
+        remaining_cost = self._compute_remaining_cost()
+        reward = -remaining_cost / self.episode_length * self.reward_scale
+
+        # Auto-execute layer when all relevant atoms have been placed
         if self.current_atom_idx >= len(self.relevant_atoms):
-            # Layer just completed — compute actual cost of this layer
-            layer_cost = self._compute_layer_cost_fast()
-            reward = -layer_cost * self.reward_scale
             self.tasks_done += 1
             self.current_atom_idx = 0
             self.current_phase_moves = []
@@ -138,19 +139,27 @@ class NeutralAtomsEnv:
                   'num_moves': self.num_moves}
         )
 
-    def _compute_layer_cost_fast(self) -> int:
-        """Inline layer cost using precomputed gate pair indices."""
-        if self.tasks_done >= self.num_tasks:
+    def _compute_layer_cost_fast(self, layer_idx=None) -> int:
+        """Compute cost of a single layer using precomputed gate pair indices."""
+        if layer_idx is None:
+            layer_idx = self.tasks_done
+        if layer_idx >= self.num_tasks:
             return 0
         total = 0
-        if len(self.current_phase_moves) > 0:
+        if layer_idx == self.tasks_done and len(self.current_phase_moves) > 0:
             reconfig_moves = torch.stack(self.current_phase_moves)
             total += count_groups_fast(reconfig_moves, canonicalize=False)
-        pairs = self._gate_pair_indices[self.tasks_done]
+        pairs = self._gate_pair_indices[layer_idx]
         if pairs is not None:
-            # Gather: (G, 2, 2) -> (G, 4) gate moves via precomputed indices
             gate_moves = self.atom_positions[pairs].reshape(-1, 4)
             total += 2 * count_groups_fast(gate_moves, canonicalize=True)
+        return total
+
+    def _compute_remaining_cost(self) -> int:
+        """Compute total cost of all remaining layers from current positions."""
+        total = 0
+        for layer_idx in range(self.tasks_done, self.num_tasks):
+            total += self._compute_layer_cost_fast(layer_idx)
         return total
 
     def _get_observation(self) -> dict:

@@ -278,10 +278,10 @@ class TestLayerLevelMDP:
         expected = sum(len(get_relevant_atoms(tasks, i)) for i in range(len(tasks)))
         assert env.episode_length == expected
 
-    def test_reward_only_at_layer_completion(self):
+    def test_reward_dense_and_negative(self):
         env, tasks = _make_env(map_num=1)
         env.reset()
-        # Reward should be 0 during placements, negative at layer completion
+        # Option D: every step gets a reward (negative remaining cost)
         rewards = []
         while env.tasks_done < env.num_tasks:
             current_q = env.current_qubit
@@ -289,34 +289,26 @@ class TestLayerLevelMDP:
                             env.atom_positions[current_q][1]).item()
             result = env.step(current_flat)
             rewards.append(result.reward)
-        # With all no-ops: reward at layer boundaries should be negative (gate cost)
-        # and zero everywhere else
-        nonzero = [r for r in rewards if r != 0]
-        assert len(nonzero) == len(tasks)  # one reward per layer
-        assert all(r < 0 for r in nonzero)  # all negative (cost)
+        # All rewards should be <= 0 (negative remaining cost)
+        assert all(r <= 0 for r in rewards)
+        # Total reward should be negative (sum of -C/L at each step)
+        assert sum(rewards) < 0
 
-    def test_total_reward_equals_neg_solution_cost(self):
+    def test_reward_differs_for_different_actions(self):
         import random
-        random.seed(42)
         env, tasks = _make_env(map_num=1)
         env.reset()
-        total_reward = 0.0
-        history = []
-        while env.tasks_done < env.num_tasks:
-            legal = env.legal_actions()
-            action = random.choice(legal)
-            result = env.step(action)
-            total_reward += result.reward
-            history.append(action)
-        # Total reward should equal -solution_cost
-        from neutral_atoms.experiment import compute_solution_cost
-        class FG:
-            def __init__(s, t, ip, ec, h): s.tasks=t; s.initial_positions=ip; s.env_config=ec; s.history=h
-        from neutral_atoms.config import MAPS, atom_map_to_positions
-        m = MAPS[1]
-        ip = atom_map_to_positions(m['atom_map'], 4)
-        cost = compute_solution_cost(FG(tasks, ip, env.config, history))
-        assert abs(total_reward + cost) < 1e-6, f'total_reward={total_reward}, cost={cost}'
+        # Two different actions from the same state should give different rewards
+        legal = env.legal_actions()
+        noop = (env.atom_positions[env.current_qubit][0] * env.board_width +
+                env.atom_positions[env.current_qubit][1]).item()
+        move = [a for a in legal if a != noop][0]
+        env_a = env.clone()
+        env_b = env.clone()
+        r_noop = env_a.step(noop).reward
+        r_move = env_b.step(move).reward
+        # Moving should change the remaining cost → different reward
+        assert r_noop != r_move
 
 
 def run_tests():
