@@ -278,34 +278,45 @@ class TestLayerLevelMDP:
         expected = sum(len(get_relevant_atoms(tasks, i)) for i in range(len(tasks)))
         assert env.episode_length == expected
 
-    def test_reward_zero_for_noops(self):
+    def test_reward_only_at_layer_completion(self):
         env, tasks = _make_env(map_num=1)
         env.reset()
-        # All no-ops: no moves, no cost change within any layer → zero reward
-        total_reward = 0.0
+        # Reward should be 0 during placements, negative at layer completion
+        rewards = []
         while env.tasks_done < env.num_tasks:
             current_q = env.current_qubit
             current_flat = (env.atom_positions[current_q][0] * env.board_width +
                             env.atom_positions[current_q][1]).item()
             result = env.step(current_flat)
-            total_reward += result.reward
-        assert abs(total_reward) < 1e-6
+            rewards.append(result.reward)
+        # With all no-ops: reward at layer boundaries should be negative (gate cost)
+        # and zero everywhere else
+        nonzero = [r for r in rewards if r != 0]
+        assert len(nonzero) == len(tasks)  # one reward per layer
+        assert all(r < 0 for r in nonzero)  # all negative (cost)
 
-    def test_reward_differs_for_different_actions(self):
+    def test_total_reward_equals_neg_solution_cost(self):
         import random
         random.seed(42)
         env, tasks = _make_env(map_num=1)
         env.reset()
-        # Random play: some moves will change cost → non-zero total reward
         total_reward = 0.0
+        history = []
         while env.tasks_done < env.num_tasks:
             legal = env.legal_actions()
             action = random.choice(legal)
             result = env.step(action)
             total_reward += result.reward
-        # Random moves should produce non-zero reward (either positive or negative)
-        # This is probabilistic but virtually guaranteed with random moves
-        assert total_reward != 0.0
+            history.append(action)
+        # Total reward should equal -solution_cost
+        from neutral_atoms.experiment import compute_solution_cost
+        class FG:
+            def __init__(s, t, ip, ec, h): s.tasks=t; s.initial_positions=ip; s.env_config=ec; s.history=h
+        from neutral_atoms.config import MAPS, atom_map_to_positions
+        m = MAPS[1]
+        ip = atom_map_to_positions(m['atom_map'], 4)
+        cost = compute_solution_cost(FG(tasks, ip, env.config, history))
+        assert abs(total_reward + cost) < 1e-6, f'total_reward={total_reward}, cost={cost}'
 
 
 def run_tests():
