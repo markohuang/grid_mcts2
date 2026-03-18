@@ -26,15 +26,13 @@ def print_config_summary(config, network):
 
 
 def format_selfplay_summary(sp_metrics):
-    parts = [f"completion={sp_metrics['completion_rate']:.0%}"]
-    parts.append(f"avg_steps={sp_metrics['avg_steps']:.1f}")
-    if 'best_cost' in sp_metrics:
-        parts.append(f"best_cost={sp_metrics['best_cost']}")
-        parts.append(f"avg_cost={sp_metrics['avg_cost']:.1f}")
+    parts = [f"best={sp_metrics['best_cost']}", f"avg={sp_metrics['avg_cost']}±{sp_metrics['cost_std']}"]
+    parts.append(f"noop={sp_metrics['noop_frac']:.0%}")
+    parts.append(f"move_dist={sp_metrics['avg_move_dist']}")
     if 'avg_root_value' in sp_metrics:
-        parts.append(f"root_val={sp_metrics['avg_root_value']:.2f}")
+        parts.append(f"V={sp_metrics['avg_root_value']:.2f}")
     if 'avg_policy_entropy' in sp_metrics:
-        parts.append(f"pi_entropy={sp_metrics['avg_policy_entropy']:.2f}")
+        parts.append(f"H={sp_metrics['avg_policy_entropy']:.2f}")
     return ', '.join(parts)
 
 

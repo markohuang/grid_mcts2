@@ -133,17 +133,19 @@ def log_game_trace(game, run_dir, label='best'):
 
 
 def selfplay_metrics(games):
-    completed = [g for g in games if g.last_info.get('tasks_done', 0) >= len(g.tasks)]
+    costs = [compute_solution_cost(g) for g in games]
+    avg_cost = sum(costs) / len(costs)
+    total_steps = sum(len(g.history) for g in games)
+    total_moves = sum(g.last_info.get('num_moves', 0) for g in games)
+    total_move_dist = sum(g.last_info.get('total_move_distance', 0) for g in games)
     metrics = {
-        'completion_rate': len(completed) / len(games),
-        'avg_steps': sum(len(g.history) for g in games) / len(games),
+        'best_cost': min(costs),
+        'avg_cost': round(avg_cost, 1),
+        'cost_std': round((sum((c - avg_cost)**2 for c in costs) / len(costs)) ** 0.5, 1),
+        'noop_frac': round(1 - total_moves / total_steps, 2) if total_steps > 0 else 0,
+        'avg_move_dist': round(total_move_dist / max(total_moves, 1), 1),
+        'best_game': games[costs.index(min(costs))],
     }
-    if completed:
-        costs = [compute_solution_cost(g) for g in completed]
-        metrics['best_cost'] = min(costs)
-        metrics['avg_cost'] = sum(costs) / len(costs)
-        best_idx = costs.index(min(costs))
-        metrics['best_game'] = completed[best_idx]
     all_root_values = [v for g in games for v in g.root_values]
     if all_root_values:
         metrics['avg_root_value'] = sum(all_root_values) / len(all_root_values)

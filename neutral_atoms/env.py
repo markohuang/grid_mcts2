@@ -54,6 +54,7 @@ class NeutralAtomsEnv:
         self.current_atom_idx = 0
         self.current_phase_moves = []
         self.total_move_distance = 0
+        self.num_moves = 0
         self._cost_dirty = True  # lazy compute _cached_cost only when needed
         self._cached_cost = None
         self._init_board_feat()
@@ -98,6 +99,7 @@ class NeutralAtomsEnv:
             dst_row, dst_col = action // self.board_width, action % self.board_width
             src_row, src_col = self.atom_positions[qubit_idx].tolist()
             self.total_move_distance += abs(dst_row - src_row) + abs(dst_col - src_col)
+            self.num_moves += 1
             # In-place board + atom_positions update (no defensive cloning)
             self.board[src_row, src_col] = EMPTY_CELL
             self.board[dst_row, dst_col] = qubit_idx
@@ -132,7 +134,8 @@ class NeutralAtomsEnv:
             info={'tasks_done': self.tasks_done,
                   'cost_lb': self.cost_lb, 'cost_ub': self.cost_ub,
                   'current_qubit': self.current_qubit,
-                  'total_move_distance': self.total_move_distance}
+                  'total_move_distance': self.total_move_distance,
+                  'num_moves': self.num_moves}
         )
 
     def _compute_layer_cost_fast(self) -> int:
@@ -213,6 +216,7 @@ class NeutralAtomsEnv:
         new_env.current_atom_idx = self.current_atom_idx
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
         new_env.total_move_distance = self.total_move_distance
+        new_env.num_moves = self.num_moves
         new_env._cost_dirty = True
         new_env._cached_cost = None
         return new_env
