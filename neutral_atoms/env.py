@@ -56,6 +56,7 @@ class NeutralAtomsEnv:
         self.current_phase_moves = []
         self.total_move_distance = 0
         self.num_moves = 0
+        self.accumulated_cost = 0  # actual cost of completed layers
         self._cost_dirty = True
         if self.reward_mode == 'layer_delta':
             self._current_layer_cost = self._compute_layer_cost_fast()  # lazy compute _cached_cost only when needed
@@ -98,17 +99,22 @@ class NeutralAtomsEnv:
         current_flat = (self.atom_positions[qubit_idx][0] * self.board_width +
                         self.atom_positions[qubit_idx][1]).item()
 
+        # Capture state BEFORE any changes for reward computation
+        if self.reward_mode == 'plan_cost':
+            plan_before = self.accumulated_cost + self._compute_remaining_cost()
+        elif self.reward_mode == 'layer_delta':
+            prev_layer_cost = self._current_layer_cost
+
+        # Apply the action
         if action != current_flat:
             dst_row, dst_col = action // self.board_width, action % self.board_width
             src_row, src_col = self.atom_positions[qubit_idx].tolist()
             self.total_move_distance += abs(dst_row - src_row) + abs(dst_col - src_col)
             self.num_moves += 1
-            # In-place board + atom_positions update (no defensive cloning)
             self.board[src_row, src_col] = EMPTY_CELL
             self.board[dst_row, dst_col] = qubit_idx
             self.atom_positions[qubit_idx, 0] = dst_row
             self.atom_positions[qubit_idx, 1] = dst_col
-            # Update cached board_feat incrementally
             self._board_feat[current_flat, qubit_idx] = 0.0
             self._board_feat[action, qubit_idx] = 1.0
             move = torch.tensor([src_row, src_col, dst_row, dst_col], dtype=torch.long)
@@ -117,30 +123,28 @@ class NeutralAtomsEnv:
         self.actions.append(action)
         self.current_atom_idx += 1
 
-        # Compute reward based on mode
-        if self.reward_mode == 'layer_delta':
-            # Option B: current-layer cost delta (dense, myopic)
-            curr_layer_cost = self._compute_layer_cost_fast()
-            reward = (self._current_layer_cost - curr_layer_cost) * self.reward_scale
-        elif self.reward_mode == 'remaining_cost':
-            # Option D: -remaining_cost / episode_length (dense, cross-layer)
-            reward = -self._compute_remaining_cost() / self.episode_length * self.reward_scale
-        else:
-            reward = 0.0  # Option C: computed below at layer completion
-
         # Auto-execute layer when all relevant atoms have been placed
+        reward = 0.0
         if self.current_atom_idx >= len(self.relevant_atoms):
-            if self.reward_mode == 'layer_completion':
-                # Option C: reward = -actual layer cost at completion
-                layer_cost = self._compute_layer_cost_fast()
-                reward = -layer_cost * self.reward_scale
+            if self.reward_mode == 'plan_cost':
+                actual_layer_cost = self._compute_layer_cost_fast()
+                self.accumulated_cost += actual_layer_cost
+            elif self.reward_mode == 'layer_completion':
+                reward = -self._compute_layer_cost_fast() * self.reward_scale
             self.tasks_done += 1
             self.current_atom_idx = 0
             self.current_phase_moves = []
-            if self.reward_mode == 'layer_delta':
-                self._current_layer_cost = self._compute_layer_cost_fast()
+
+        # Compute reward based on mode
+        if self.reward_mode == 'plan_cost':
+            plan_after = self.accumulated_cost + self._compute_remaining_cost()
+            reward = (plan_before - plan_after) * self.reward_scale
         elif self.reward_mode == 'layer_delta':
+            curr_layer_cost = self._compute_layer_cost_fast()
+            reward = (prev_layer_cost - curr_layer_cost) * self.reward_scale
             self._current_layer_cost = curr_layer_cost
+        elif self.reward_mode == 'remaining_cost':
+            reward = -self._compute_remaining_cost() / self.episode_length * self.reward_scale
 
         self._cost_dirty = True
         done = is_episode_done(self.tasks_done, self.num_tasks)
@@ -243,6 +247,7 @@ class NeutralAtomsEnv:
         new_env.current_phase_moves = [m.clone() for m in self.current_phase_moves]
         new_env.total_move_distance = self.total_move_distance
         new_env.num_moves = self.num_moves
+        new_env.accumulated_cost = self.accumulated_cost
         new_env.reward_mode = self.reward_mode
         if self.reward_mode == 'layer_delta':
             new_env._current_layer_cost = self._current_layer_cost

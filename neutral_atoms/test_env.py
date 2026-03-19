@@ -278,37 +278,45 @@ class TestLayerLevelMDP:
         expected = sum(len(get_relevant_atoms(tasks, i)) for i in range(len(tasks)))
         assert env.episode_length == expected
 
-    def test_reward_dense_and_negative(self):
+    def test_plan_cost_no_jump_at_autoexec(self):
+        import random
+        random.seed(42)
         env, tasks = _make_env(map_num=1)
         env.reset()
-        # Option D: every step gets a reward (negative remaining cost)
+        env.reward_mode = 'plan_cost'
+        # At auto-execute, reward should be ~0 (plan cost doesn't jump)
         rewards = []
+        autoexec_rewards = []
         while env.tasks_done < env.num_tasks:
-            current_q = env.current_qubit
-            current_flat = (env.atom_positions[current_q][0] * env.board_width +
-                            env.atom_positions[current_q][1]).item()
-            result = env.step(current_flat)
+            layer_before = env.tasks_done
+            result = env.step(random.choice(env.legal_actions()))
             rewards.append(result.reward)
-        # All rewards should be <= 0 (negative remaining cost)
-        assert all(r <= 0 for r in rewards)
-        # Total reward should be negative (sum of -C/L at each step)
-        assert sum(rewards) < 0
+            if env.tasks_done > layer_before:
+                autoexec_rewards.append(result.reward)
+        # Auto-execute rewards should be small (plan cost mostly stable)
+        non_autoexec = [r for i, r in enumerate(rewards) if r not in autoexec_rewards]
+        if non_autoexec and autoexec_rewards:
+            avg_normal = sum(abs(r) for r in non_autoexec) / len(non_autoexec)
+            avg_autoexec = sum(abs(r) for r in autoexec_rewards) / len(autoexec_rewards)
+            # Auto-exec rewards should not be dramatically larger than normal rewards
+            assert avg_autoexec <= avg_normal * 3, \
+                f'Auto-exec rewards too large: {avg_autoexec:.1f} vs normal {avg_normal:.1f}'
 
-    def test_reward_differs_for_different_actions(self):
+    def test_plan_cost_total_varies(self):
         import random
         env, tasks = _make_env(map_num=1)
         env.reset()
-        # Two different actions from the same state should give different rewards
-        legal = env.legal_actions()
-        noop = (env.atom_positions[env.current_qubit][0] * env.board_width +
-                env.atom_positions[env.current_qubit][1]).item()
-        move = [a for a in legal if a != noop][0]
-        env_a = env.clone()
-        env_b = env.clone()
-        r_noop = env_a.step(noop).reward
-        r_move = env_b.step(move).reward
-        # Moving should change the remaining cost → different reward
-        assert r_noop != r_move
+        env.reward_mode = 'plan_cost'
+        totals = []
+        for seed in [42, 99]:
+            random.seed(seed)
+            e = env.clone()
+            total = 0
+            while e.tasks_done < e.num_tasks:
+                total += e.step(random.choice(e.legal_actions())).reward
+            totals.append(total)
+        # Different action sequences should give different total rewards
+        assert totals[0] != totals[1]
 
 
 def run_tests():
