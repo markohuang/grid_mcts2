@@ -264,3 +264,96 @@ The key difference: Option A's reward and value CANCEL because they encode the s
 | MCTS distinguishes? | No (Q collapse) | Yes (within-layer) | Yes | Yes |
 | Incentivizes early improvement? | No | No | Weakly | Strongly |
 | Needs accurate V? | Fatally (causes collapse) | Somewhat | Yes (carries cross-layer) | Somewhat |
+
+## Option E: Plan Cost (accumulated_actual + remaining_heuristic)
+
+```
+plan_cost(state) = accumulated_actual_cost + compute_remaining_cost(state)
+reward = plan_cost(before_step) - plan_cost(after_step)
+```
+
+### How it works
+
+Track two components:
+- `accumulated_cost`: sum of actual costs of completed layers (grows at each auto-execute)
+- `_compute_remaining_cost()`: heuristic cost of all remaining layers from current positions
+
+At each step, reward = delta of their sum.
+
+### During atom placements (within a layer)
+
+accumulated_cost doesn't change. Reward = delta of remaining heuristic cost.
+This is identical to Option A — cross-layer, dense signal.
+
+### At auto-execute
+
+This is where Option E differs from both A and the simplified version:
+
+1. `_compute_layer_cost_fast()` computes the actual cost of the just-completed layer
+2. This actual cost gets added to `accumulated_cost`
+3. Meanwhile, `_compute_remaining_cost()` drops the completed layer from its sum
+
+The reward = `plan_before - plan_after` is usually small but NOT forced to zero.
+
+**Why it's nonzero**: The remaining heuristic cost BEFORE auto-execute included the
+current layer's estimated cost. The actual layer cost (computed at auto-execute) may
+differ because the last atom placement changed the reconfig group count. The reward
+captures this discrepancy: "the last placement made this layer X units more/less
+expensive than the heuristic predicted."
+
+Empirically: 60% of auto-execute rewards are nonzero, ranging from -5 to +2.
+This provides a calibration signal that helps the value network learn the gap
+between heuristic estimates and actual costs.
+
+### Why it doesn't telescope
+
+```
+total_reward = plan_cost(start) - plan_cost(end)
+             = [0 + initial_heuristic] - [actual_solution_cost + 0]
+             = initial_heuristic - actual_solution_cost
+```
+
+initial_heuristic is constant. actual_solution_cost varies with actions.
+Different action sequences → different total rewards. No telescoping.
+
+### Why Q-values don't collapse
+
+In Option A: V*(s) = C(s) (mathematical identity, policy-independent).
+In Option E: V(s) = plan_cost(s) - E_π[solution_cost from s].
+
+E_π[solution_cost] depends on how well the policy performs on remaining layers.
+A perfect V must predict policy quality, not just state cost.
+This makes V(s) policy-dependent → R + V doesn't perfectly cancel → 
+Q-values differ between actions even with a well-trained V.
+
+### Empirical results
+
+| Metric (Map 2, 50 sims) | Option B | Option E |
+|---|---|---|
+| eval_best | 13-16 | **13** |
+| eval_avg (converged) | 15-18 | **14.6** |
+| noop_frac (epoch 10) | 36% | **66%** |
+| MCTS depth (epoch 10) | 3.1 | **3.6** |
+| reward_frac | 82% | 73% |
+
+Option E learns "don't move" faster (66% noops vs 36%), goes deeper in MCTS (3.6 vs 3.1),
+and achieves lower eval cost (13 vs 16).
+
+### Simplified version (suppress to zero) performs WORSE
+
+Forcing auto-execute reward to exactly 0 loses the calibration signal.
+Result: eval_best=16 (both seeds) vs 13 for accumulated_cost version.
+The residual nonzero rewards at boundaries help the value network calibrate
+its heuristic estimates against actual costs.
+
+### Updated comparison table
+
+| Property | A (Δ all-layers) | B (Δ current-layer) | C (layer completion) | D (raw cost) | E (plan cost) |
+|---|---|---|---|---|---|
+| Telescopes? | Yes → constant | Within-layer only | No | No | No |
+| Cross-layer? | Yes (useless) | No | Via value net | Yes (buried) | **Yes (direct)** |
+| Dense? | Every step | Every step | Every ~8 steps | Every step | **Every step** |
+| Q-collapse? | Yes (fatal) | Partial | No | No | **No** |
+| Auto-exec reward | Large jump | N/A | -layer_cost | N/A | **Small calibration** |
+| Signal quality | High then collapses | High (myopic) | Depends on V | Weak (offset) | **High + cross-layer** |
+| Best eval (Map 2) | Never tested | 13 | 26 | 27 | **13** |
