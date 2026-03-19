@@ -265,95 +265,83 @@ The key difference: Option A's reward and value CANCEL because they encode the s
 | Incentivizes early improvement? | No | No | Weakly | Strongly |
 | Needs accurate V? | Fatally (causes collapse) | Somewhat | Yes (carries cross-layer) | Somewhat |
 
-## Option E: Plan Cost (accumulated_actual + remaining_heuristic)
+## Option E: Plan Cost (remaining cost delta, reward computed before auto-execute)
 
-```
-plan_cost(state) = accumulated_actual_cost + compute_remaining_cost(state)
-reward = plan_cost(before_step) - plan_cost(after_step)
+```python
+cost_before = _compute_remaining_cost()  # BEFORE the move
+# apply move
+cost_after_move = _compute_remaining_cost()  # AFTER move, BEFORE auto-execute
+reward = cost_before - cost_after_move
+# THEN auto-execute (tasks_done++, clear moves) — no reward for this
 ```
 
 ### How it works
 
-Track two components:
-- `accumulated_cost`: sum of actual costs of completed layers (grows at each auto-execute)
-- `_compute_remaining_cost()`: heuristic cost of all remaining layers from current positions
+Same delta as Option A (`remaining_cost_before - remaining_cost_after`), but the reward
+is computed BEFORE the auto-execute state changes. The `tasks_done++` and
+`current_phase_moves` clearing happen AFTER reward computation, so they don't
+create the large artificial jump that causes telescoping in Option A.
 
-At each step, reward = delta of their sum.
+### Why Option A telescopes but Option E doesn't
 
-### During atom placements (within a layer)
+In Option A, the reward at auto-execute = `C(before_autoexec) - C(after_autoexec)`.
+The auto-execute drops the completed layer from `compute_remaining_cost`, creating
+a large positive reward (= the layer's full cost). This "free" reward makes the
+total sum constant: `Σ rewards = C(initial) - C(terminal) = C(initial) - 0 = constant`.
 
-accumulated_cost doesn't change. Reward = delta of remaining heuristic cost.
-This is identical to Option A — cross-layer, dense signal.
+In Option E, the reward at the auto-execute step is the impact of the LAST PLACEMENT
+only. The `tasks_done++` and `current_phase_moves` clearing happen after, contributing
+no reward. The "free" layer-drop reward is eliminated.
 
-### At auto-execute
+### Auto-execute rewards are nonzero
 
-This is where Option E differs from both A and the simplified version:
+The last placement in a layer changes atom positions and adds a reconfig move,
+which changes `_compute_remaining_cost()`. Empirically, 60% of auto-execute step
+rewards are nonzero (range [-5, +2]). This is the move's actual impact on remaining
+cost — genuine signal, not an artifact.
 
-1. `_compute_layer_cost_fast()` computes the actual cost of the just-completed layer
-2. This actual cost gets added to `accumulated_cost`
-3. Meanwhile, `_compute_remaining_cost()` drops the completed layer from its sum
-
-The reward = `plan_before - plan_after` is usually small but NOT forced to zero.
-
-**Why it's nonzero**: The remaining heuristic cost BEFORE auto-execute included the
-current layer's estimated cost. The actual layer cost (computed at auto-execute) may
-differ because the last atom placement changed the reconfig group count. The reward
-captures this discrepancy: "the last placement made this layer X units more/less
-expensive than the heuristic predicted."
-
-Empirically: 60% of auto-execute rewards are nonzero, ranging from -5 to +2.
-This provides a calibration signal that helps the value network learn the gap
-between heuristic estimates and actual costs.
-
-### Why it doesn't telescope
+### Total reward
 
 ```
-total_reward = plan_cost(start) - plan_cost(end)
-             = [0 + initial_heuristic] - [actual_solution_cost + 0]
-             = initial_heuristic - actual_solution_cost
+total = Σ (cost_before_move - cost_after_move)  [only move impacts, no layer-drop jumps]
+      = initial_heuristic - actual_solution_cost  [varies with actions]
 ```
-
-initial_heuristic is constant. actual_solution_cost varies with actions.
-Different action sequences → different total rewards. No telescoping.
 
 ### Why Q-values don't collapse
 
-In Option A: V*(s) = C(s) (mathematical identity, policy-independent).
-In Option E: V(s) = plan_cost(s) - E_π[solution_cost from s].
+In Option A: the total future reward from any state s = `C(s)` regardless of policy
+(mathematical identity from telescoping). So V*(s) = C(s), and Q = R + V = C(s) for all actions.
 
-E_π[solution_cost] depends on how well the policy performs on remaining layers.
-A perfect V must predict policy quality, not just state cost.
-This makes V(s) policy-dependent → R + V doesn't perfectly cancel → 
-Q-values differ between actions even with a well-trained V.
+In Option E: the total future reward from state s = `C(s) - Σ(layer_drop_jumps)`.
+The layer_drop_jumps depend on what actual costs the policy incurs in future layers.
+So V(s) = C(s) - E_π[future_actual_costs], which is POLICY-DEPENDENT.
+A good policy incurs lower costs → higher V. This prevents R + V from cancelling.
 
-### Empirical results
+### Empirical results (Map 2, 5x5, 50 sims)
 
-| Metric (Map 2, 50 sims) | Option B | Option E |
-|---|---|---|
-| eval_best | 13-16 | **13** |
-| eval_avg (converged) | 15-18 | **14.6** |
-| noop_frac (epoch 10) | 36% | **66%** |
-| MCTS depth (epoch 10) | 3.1 | **3.6** |
-| reward_frac | 82% | 73% |
+| Seed | eval_best | eval_avg (converged) |
+|------|-----------|---------------------|
+| 12315 | **12** | **12.0** |
+| 99999 | **12** | 13.0 |
 
-Option E learns "don't move" faster (66% noops vs 36%), goes deeper in MCTS (3.6 vs 3.1),
-and achieves lower eval cost (13 vs 16).
+Both seeds reach eval_best=12. Seed A converges to eval_avg=12.0 (every game finds cost 12).
 
-### Simplified version (suppress to zero) performs WORSE
+### Failed alternatives
 
-Forcing auto-execute reward to exactly 0 loses the calibration signal.
-Result: eval_best=16 (both seeds) vs 13 for accumulated_cost version.
-The residual nonzero rewards at boundaries help the value network calibrate
-its heuristic estimates against actual costs.
+- **Suppress auto-execute to zero**: Forces reward=0 at boundaries, losing the last
+  placement's impact. eval_best=16 (both seeds). Worse because it discards genuine signal.
+- **accumulated_cost tracking**: Equivalent rewards but unnecessary complexity.
+  The clean version (compute reward before auto-execute) is simpler and produces
+  identical results.
 
-### Updated comparison table
+### Comparison table
 
 | Property | A (Δ all-layers) | B (Δ current-layer) | C (layer completion) | D (raw cost) | E (plan cost) |
 |---|---|---|---|---|---|
-| Telescopes? | Yes → constant | Within-layer only | No | No | No |
+| Telescopes? | Yes → constant | Within-layer only | No | No | **No** |
 | Cross-layer? | Yes (useless) | No | Via value net | Yes (buried) | **Yes (direct)** |
 | Dense? | Every step | Every step | Every ~8 steps | Every step | **Every step** |
 | Q-collapse? | Yes (fatal) | Partial | No | No | **No** |
-| Auto-exec reward | Large jump | N/A | -layer_cost | N/A | **Small calibration** |
-| Signal quality | High then collapses | High (myopic) | Depends on V | Weak (offset) | **High + cross-layer** |
-| Best eval (Map 2) | Never tested | 13 | 26 | 27 | **13** |
+| Auto-exec reward | Large jump (layer cost) | N/A | -layer_cost | N/A | **Last move's impact** |
+| Signal quality | Collapses with good V | High (myopic) | Needs pretrained V | Weak (offset) | **High + cross-layer** |
+| Best eval (Map 2) | Never tested | 13-16 | 26 | 27 | **12** |
