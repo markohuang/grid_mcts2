@@ -3,7 +3,7 @@ from .types import StepResult, EMPTY_CELL, to_json
 from .board import create_board, move_qubit_to_cell
 from .tasks import is_episode_done, get_relevant_atoms
 from .rewards import compute_total_cost, compute_current_layer_cost, compute_reward, compute_cost_bounds
-from .fast_moves import count_groups_fast
+from .fast_moves import count_groups_fast, group_entropy_fast
 
 
 class NeutralAtomsEnv:
@@ -19,6 +19,7 @@ class NeutralAtomsEnv:
         self.cost_lb, self.cost_ub = compute_cost_bounds(tasks)
         self.reward_scale = config.reward_scale
         self.reward_mode = getattr(config, 'reward_mode', 'remaining_cost')
+        self.entropy_weight = getattr(config, 'entropy_weight', 0.0)
         self._precompute_relevant_atoms()
         self._precompute_gate_indicators()
         self.reset()
@@ -158,20 +159,25 @@ class NeutralAtomsEnv:
                   'num_moves': self.num_moves}
         )
 
-    def _compute_layer_cost_fast(self, layer_idx=None) -> int:
-        """Compute cost of a single layer using precomputed gate pair indices."""
+    def _compute_layer_cost_fast(self, layer_idx=None) -> float:
+        """Compute cost of a single layer using precomputed gate pair indices.
+        Includes optional within-group entropy as a tie-breaker signal."""
         if layer_idx is None:
             layer_idx = self.tasks_done
         if layer_idx >= self.num_tasks:
             return 0
-        total = 0
+        total = 0.0
         if layer_idx == self.tasks_done and len(self.current_phase_moves) > 0:
             reconfig_moves = torch.stack(self.current_phase_moves)
             total += count_groups_fast(reconfig_moves, canonicalize=False)
+            if self.entropy_weight > 0:
+                total += self.entropy_weight * group_entropy_fast(reconfig_moves, canonicalize=False)
         pairs = self._gate_pair_indices[layer_idx]
         if pairs is not None:
             gate_moves = self.atom_positions[pairs].reshape(-1, 4)
             total += 2 * count_groups_fast(gate_moves, canonicalize=True)
+            if self.entropy_weight > 0:
+                total += self.entropy_weight * group_entropy_fast(gate_moves, canonicalize=True)
         return total
 
     def _compute_remaining_cost(self) -> int:
@@ -246,6 +252,7 @@ class NeutralAtomsEnv:
         new_env.total_move_distance = self.total_move_distance
         new_env.num_moves = self.num_moves
         new_env.reward_mode = self.reward_mode
+        new_env.entropy_weight = self.entropy_weight
         if self.reward_mode == 'layer_delta':
             new_env._current_layer_cost = self._current_layer_cost
         new_env._cost_dirty = True

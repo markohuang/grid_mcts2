@@ -58,6 +58,7 @@ def get_config():
     c.env = ml_collections.ConfigDict()
     c.env.reward_scale = 1.0
     c.env.reward_mode = 'plan_cost'  # 'plan_cost', 'layer_delta', 'layer_completion', 'remaining_cost'
+    c.env.entropy_weight = 0.0  # tie-breaker: adds entropy_weight * within_group_entropy to cost (0 = off)
 
     c.mcts = ml_collections.ConfigDict()
     c.mcts.num_simulations = 50
@@ -87,11 +88,18 @@ def get_config():
     c.training.seed = 12315
     c.training.policy_target_temperature = 1.0
     c.training.num_parallel_games = 1
+    c.training.priority_exponent = 0.0  # 0 = uniform sampling, >0 = prioritize low-cost games
+    c.training.data_augmentation = False  # apply random board symmetries to training batches
 
     c.experiment = ml_collections.ConfigDict()
     c.experiment.output_dir = './outputs'
     c.experiment.checkpoint_every_n_epochs = 10
     c.experiment.early_stopping_patience = 10
+    c.experiment.load_checkpoint = ''       # path to load model weights from before training
+    c.experiment.curriculum_maps = 0        # number of random maps to add progressively (0 = off)
+    c.experiment.curriculum_patience = 20   # epochs without improvement before adding next map
+    c.experiment.curriculum_initial_phase = 0  # pre-populate map pool for resuming mid-curriculum
+    c.training.fixed_map_fraction = 0.0    # fraction of selfplay games using the fixed eval map (0 = off)
 
     c.network = ml_collections.ConfigDict()
     c.network.v_hsize = 64

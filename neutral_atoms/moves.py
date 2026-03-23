@@ -1,5 +1,8 @@
 import torch
 from .types import Moves
+from .fast_moves import count_groups_fast, parallel_groups_fast, warmup as _warmup_numba
+
+_warmup_numba()  # trigger JIT compilation at import time
 
 def is_parallel_executable_batch(moves: Moves) -> torch.Tensor:
     """Returns (N, N) bool tensor, True = can run in parallel."""
@@ -87,24 +90,12 @@ def canonicalize_moves(moves: Moves) -> Moves:
     return result
 
 def parallel_groups(moves: Moves, canonicalize: bool = False) -> torch.Tensor:
-    """
-    Returns (N,) group assignments.
-    Args:
-        moves: (N, 4) tensor of [from_x, from_y, to_x, to_y]
-        canonicalize: True for gate moves (direction flexible), False for reconfig
-    """
-    if len(moves) == 0:
-        return torch.empty(0, dtype=torch.long)
-    if len(moves) == 1:
-        return torch.zeros(1, dtype=torch.long)
-    if canonicalize:
-        moves = canonicalize_moves(moves)
-    return greedy_color_from_adjacency(is_parallel_executable_batch(moves))
+    """Returns (N,) group assignments. Uses numba fast path."""
+    return parallel_groups_fast(moves, canonicalize)
 
 def count_groups(moves: Moves, canonicalize: bool = False) -> int:
-    if len(moves) == 0:
-        return 0
-    return parallel_groups(moves, canonicalize).max().item() + 1
+    """Returns number of parallel groups. Uses numba fast path."""
+    return count_groups_fast(moves, canonicalize)
 
 def group_sizes(moves: Moves, canonicalize: bool = False) -> torch.Tensor:
     if len(moves) == 0:

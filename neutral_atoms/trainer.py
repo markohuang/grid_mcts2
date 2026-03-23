@@ -2,7 +2,7 @@ import torch
 import concurrent.futures
 from lightning import Fabric
 from tensordict import TensorDict
-from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
+from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage, PrioritizedSampler
 
 from .game import Game
 from .mcts import play_game
@@ -32,14 +32,46 @@ class AlphaAtomsTrainer:
         self.initial_positions = initial_positions
         self.board_h = config.env.board_height
         self.board_w = config.env.board_width
+        # Map pool: list of (tasks, ip) for curriculum. Index 0 is always the fixed eval map.
+        self.map_pool = [(tasks, initial_positions)]
+        self.fixed_map_fraction = getattr(config.training, 'fixed_map_fraction', 0.0)
+        priority_exponent = getattr(config.training, 'priority_exponent', 0.0)
+        if priority_exponent > 0:
+            sampler = PrioritizedSampler(
+                max_capacity=config.training.buffer_size, alpha=1.0, beta=0.0
+            )
+        else:
+            sampler = None
+        self.priority_exponent = priority_exponent
         self.replay_buffer = TensorDictReplayBuffer(
-            storage=LazyTensorStorage(config.training.buffer_size)
+            storage=LazyTensorStorage(config.training.buffer_size),
+            **({"sampler": sampler} if sampler else {})
         )
         self.selfplay_iter = 0
         self._fabric = None
         self._model = None
         self._optimizer = None
         self._pool = None
+        aug = getattr(config.training, 'data_augmentation', False)
+        self._sym_perms = self._make_sym_perms() if aug else None
+
+    def _make_sym_perms(self):
+        """(8, board_size) symmetry permutations for a square board. None if non-square."""
+        N = self.board_h
+        if self.board_h != self.board_w:
+            return None
+        r = torch.arange(N).repeat_interleave(N)  # row index for each cell
+        c = torch.arange(N).repeat(N)              # col index for each cell
+        perms = []
+        for rot in range(4):
+            for flip in [False, True]:
+                pr, pc = r.clone(), c.clone()
+                if flip:
+                    pc = N - 1 - pc
+                for _ in range(rot):
+                    pr, pc = N - 1 - pc, pr  # undo 90°CW = apply 90°CCW
+                perms.append(pr * N + pc)
+        return torch.stack(perms)  # (8, board_size)
 
     def _setup_fabric(self):
         if self._fabric is not None:
@@ -62,20 +94,25 @@ class AlphaAtomsTrainer:
         return self._pool
 
     def _get_game_instance(self):
+        import random
+        # Curriculum pool: fixed_map_fraction goes to ALL old maps (pool[:-1]) uniformly,
+        # remaining 1-fixed_map_fraction focuses on the newest map (pool[-1])
+        if self.fixed_map_fraction > 0 and len(self.map_pool) > 1:
+            if random.random() < self.fixed_map_fraction:
+                return random.choice(self.map_pool[:-1])  # retention: any old map
+            else:
+                return self.map_pool[-1]  # focus: newest map
         if self.config.random_board:
             from .map_generator import generate_random_map
             from .config import atom_map_to_positions
-            import random
             seed = self.config.random_board_seed
             if seed < 0:
                 seed = None  # truly random
-            # Curriculum: vary gates_per_layer for mixed difficulty
-            num_qubits = self.config.env.num_qubits
-            max_gates = num_qubits // 2
-            gates_per_layer = random.randint(max(2, max_gates // 3), max_gates)
+            # Fixed structure matching reference map: same board, qubits, layers, gates per layer
+            gates_per_layer = max(len(layer) for layer in self.tasks)
             m = generate_random_map(
                 (self.board_h, self.board_w),
-                num_qubits,
+                self.config.env.num_qubits,
                 self.config.network.num_tasks,
                 gates_per_layer=gates_per_layer,
                 seed=seed,
@@ -84,6 +121,21 @@ class AlphaAtomsTrainer:
             ip = atom_map_to_positions(m['atom_map'], self.board_w)
             return tasks, ip
         return self.tasks, self.initial_positions
+
+    def expand_map_pool(self, map_seed):
+        from .map_generator import generate_random_map
+        from .config import atom_map_to_positions
+        gates_per_layer = max(len(layer) for layer in self.tasks)
+        m = generate_random_map(
+            (self.board_h, self.board_w),
+            self.config.env.num_qubits,
+            self.config.network.num_tasks,
+            gates_per_layer=gates_per_layer,
+            seed=map_seed,
+        )
+        new_entry = (m['tasks'], atom_map_to_positions(m['atom_map'], self.board_w))
+        self.map_pool.append(new_entry)
+        return new_entry
 
     def run_selfplay(self):
         self.network.eval()
@@ -99,6 +151,7 @@ class AlphaAtomsTrainer:
         return games
 
     def _run_sequential_selfplay(self, num_games):
+        from .experiment import compute_solution_cost
         prev_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         games = []
@@ -106,7 +159,8 @@ class AlphaAtomsTrainer:
             tasks, ip = self._get_game_instance()
             game = Game(self.config, tasks, ip)
             game = play_game(game, self.config.mcts, self.network)
-            self.save_game(game)
+            game_cost = compute_solution_cost(game)
+            self.save_game(game, game_cost)
             games.append(game)
             tasks_done = game.last_info.get('tasks_done', 0)
             print(f"  game {idx+1}/{num_games}: "
@@ -130,10 +184,12 @@ class AlphaAtomsTrainer:
                             ip, network_config_dict, use_fake)
             )
 
+        from .experiment import compute_solution_cost
         games = []
         for idx, future in enumerate(futures):
             game = future.result()
-            self.save_game(game)
+            game_cost = compute_solution_cost(game)
+            self.save_game(game, game_cost)
             games.append(game)
             tasks_done = game.last_info.get('tasks_done', 0)
             print(f"  game {idx+1}/{num_games}: "
@@ -141,7 +197,7 @@ class AlphaAtomsTrainer:
                   f"tasks_done={tasks_done}/{len(game.tasks)}")
         return games
 
-    def save_game(self, game):
+    def save_game(self, game, game_cost=None):
         td_steps = self.config.training.td_steps
         features, bootstrap_features = [], []
         cvals, lvals, pis, bvals = [], [], [], []
@@ -166,7 +222,12 @@ class AlphaAtomsTrainer:
             ('target', 'policies'): torch.tensor(pis, dtype=torch.float32),
             ('target', 'bootstrap_discounts'): torch.tensor(bvals, dtype=torch.float32),
         }, batch_size=len(game.history))
-        self.replay_buffer.extend(observations)
+        indices = self.replay_buffer.extend(observations)
+        if self.priority_exponent > 0 and game_cost is not None and game_cost > 0:
+            priority = (1.0 / game_cost) ** self.priority_exponent
+            self.replay_buffer.update_priority(
+                indices, torch.full((len(indices),), priority)
+            )
 
     def fit(self):
         cfg = self.config.training
@@ -185,8 +246,14 @@ class AlphaAtomsTrainer:
         for iteration in range(cfg.training_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
-            # Spatial augmentation (disabled — needs per-sample transform, not per-batch)
-            # TODO: implement per-sample augmentation correctly
+            if self._sym_perms is not None:
+                B = batch['obs']['features'].shape[0]
+                perms = self._sym_perms[torch.randint(8, (B,))].to(fabric.device)  # (B, board_size)
+                feat_idx = perms[:, None, :, None].expand_as(batch['obs']['features'])
+                batch['obs']['features'] = torch.gather(batch['obs']['features'], 2, feat_idx)
+                boot = batch['bootstrap_obs']['features']
+                batch['bootstrap_obs']['features'] = torch.gather(boot, 2, feat_idx.expand_as(boot))
+                batch['target']['policies'] = torch.gather(batch['target']['policies'], 1, perms)
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
