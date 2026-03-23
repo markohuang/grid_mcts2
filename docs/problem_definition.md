@@ -231,10 +231,16 @@ Action space = board_size (e.g., 25 for 5×5, 64 for 8×8)
 
 ### Dense Reward
 
+Default mode: `plan_cost` (configurable via `config.env.reward_mode`).
+
 ```python
-reward = prev_current_layer_cost - curr_current_layer_cost
+cost_before = _compute_remaining_cost()  # BEFORE the move
+# apply move
+cost_after  = _compute_remaining_cost()  # AFTER move, BEFORE auto-execute
+reward = reward_scale * (cost_before - cost_after)
+# THEN: tasks_done++, current_phase_moves cleared (no reward for this)
 ```
 
-Where `current_layer_cost = reconfig_groups(moves so far) + 2 × gate_groups(current layer from current positions)`. Computed before auto-execute, using only the current layer (not all remaining layers).
+Where `remaining_cost` = `Σ layer_cost(t)` for `t = tasks_done..num_tasks`. Each `layer_cost` includes reconfig groups for moves made in that layer + 2 × gate groups from current atom positions.
 
-This provides per-step signal: moves that improve the current layer's parallel execution cost get positive reward, moves that worsen it get negative reward.
+The reward is computed before the auto-execute state change, so it reflects the move's actual impact on remaining cost — not an artificial drop from the completed layer being removed. This avoids the telescoping-sum problem (total reward = constant) while providing cross-layer signal: a move that improves atom positions for future layers also reduces `remaining_cost` immediately.

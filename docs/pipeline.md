@@ -53,7 +53,7 @@ Episode ends when all layers are done.
 │  └─────────────┘    └──────────────────┘    └────────────────────────┘   │
 │                                                                          │
 │  × num_selfplay       LazyTensorStorage       × training_steps           │
-│    games/epoch         (capacity: 1000)          per epoch                │
+│    games/epoch         (capacity: 50000)         per epoch                │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -154,11 +154,24 @@ Training targets per step `i`:
 
 ### Reward signal (rewards.py)
 
+Default reward mode: `plan_cost` (configurable via `config.env.reward_mode`).
+
 ```
-reward = reward_scale * (prev_current_layer_cost - curr_current_layer_cost)
+cost_before = _compute_remaining_cost()   # BEFORE the move
+# apply move
+cost_after  = _compute_remaining_cost()   # AFTER move, BEFORE auto-execute
+reward = reward_scale * (cost_before - cost_after)
+# THEN auto-execute (tasks_done++, clear current_phase_moves) — no reward for this
 ```
 
-Where `current_layer_cost` = parallel execution cost of the **current gate layer only** given current atom positions (computed before auto-execute). Previous versions used the total remaining cost across all layers, but that telescoped to a constant cumulative reward regardless of actions, making it impossible for MCTS to distinguish good from bad trajectories. Using current-layer-only cost breaks the telescoping sum and provides a meaningful dense signal.
+Where `remaining_cost` = sum of layer costs for all remaining layers (`tasks_done` to `num_tasks`), computed via `_compute_remaining_cost()`.
+
+The key property: reward is computed **before** the auto-execute state change (`tasks_done++`, `current_phase_moves` clearing), so it captures only the impact of the move itself — not an artificial "layer completion bonus" that would telescope. This avoids the telescoping-sum problem (where total reward = constant regardless of actions) while still providing cross-layer signal (since `remaining_cost` includes all future layers).
+
+Other available modes (set via `config.env.reward_mode`):
+- `layer_delta`: delta of current-layer cost only (myopic, no cross-layer signal)
+- `layer_completion`: sparse reward at layer boundaries (−layer_cost when auto-executing)
+- `remaining_cost`: −remaining_cost / episode_length at every step
 
 ### Action space (env.py)
 
@@ -175,10 +188,14 @@ Legal actions: current cell + all empty cells. Occupied cells (by other atoms) a
 
 ```
 config
-├── map_num          # Which map to use (0, 1, 2)
-├── use_fake         # Use FakeNet for testing
+├── map_num              # Which map to use (0..4)
+├── use_fake             # Use FakeNet for testing
+├── random_board         # If True, generate random board each game
+├── random_board_seed    # -1 = different seed each game
 ├── env
 │   ├── reward_scale
+│   ├── reward_mode      # 'plan_cost' | 'layer_delta' | 'layer_completion' | 'remaining_cost'
+│   ├── entropy_weight   # tie-breaker: adds entropy_weight * within_group_entropy (0 = off)
 │   └── board_height, board_width, num_qubits  (derived from map)
 ├── mcts
 │   ├── num_simulations, discount, max_moves
@@ -191,12 +208,20 @@ config
 │   ├── batch_size, lr, grad_norm_clip
 │   ├── buffer_size, td_steps
 │   ├── policy_target_temperature
+│   ├── num_parallel_games                     (parallel self-play workers)
+│   ├── priority_exponent                      (0 = uniform, >0 = prioritize low-cost games)
+│   ├── data_augmentation                      (apply board symmetries to training batches)
+│   ├── fixed_map_fraction                     (fraction of games on fixed eval map; 0 = off)
 │   ├── log_interval
 │   └── accelerator, devices, seed
 ├── experiment
 │   ├── output_dir                             (default: ./outputs)
 │   ├── checkpoint_every_n_epochs              (default: 10)
-│   └── early_stopping_patience                (default: 10)
+│   ├── early_stopping_patience                (default: 10)
+│   ├── load_checkpoint                        (path to load weights before training; '' = off)
+│   ├── curriculum_maps                        (random maps to add progressively; 0 = off)
+│   ├── curriculum_patience                    (epochs without improvement before adding next map)
+│   └── curriculum_initial_phase               (pre-populate map pool for resuming mid-curriculum)
 └── network
     ├── v_hsize, p_hsize, mlp_depth
     ├── ema_decay, num_bins, value_min, value_max

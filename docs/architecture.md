@@ -91,11 +91,17 @@ for each remaining layer (tasks_done .. num_tasks):
 
 ### Reward
 
+Default mode: `plan_cost` (configurable via `config.env.reward_mode`).
+
 ```
-reward = reward_scale * (prev_current_layer_cost - curr_current_layer_cost)
+cost_before = _compute_remaining_cost()  # sum of all remaining layer costs, BEFORE the move
+# apply move
+cost_after  = _compute_remaining_cost()  # AFTER move, BEFORE auto-execute
+reward = reward_scale * (cost_before - cost_after)
+# THEN auto-execute (tasks_done++, current_phase_moves cleared) — no reward for this
 ```
 
-Computed every step using the cost of the **current gate layer only** (before auto-execute). Previous versions used total remaining cost across all layers, but that telescoped to a constant cumulative reward, preventing MCTS from distinguishing good from bad trajectories. Current-layer-only cost breaks the telescoping sum.
+`_compute_remaining_cost()` sums layer costs for layers `tasks_done..num_tasks`. Computing the reward before auto-execute means only the move's actual impact is captured — not the artificial "layer completion drop" that would otherwise make the total reward a constant (telescoping sum). The remaining-cost view also gives cross-layer signal: a move that helps future layers improves the reward even if it slightly hurts the current layer.
 
 ### Episode Termination
 
@@ -119,9 +125,12 @@ neutral_atoms/
 ├── config.py              # ml_collections ConfigDict (get_config, set_derived_config), MAPS
 ├── board.py               # Board creation, move application, per-qubit legal actions
 ├── moves.py               # Vectorized parallel grouping, canonicalization, graph coloring
+├── fast_moves.py          # Optimized parallel grouping used at runtime (count_groups_fast, group_entropy_fast)
 ├── tasks.py               # Gate layer utilities (gates_to_moves, get_relevant_atoms)
 ├── rewards.py             # Cost computation (parallel groups), reward function
 ├── env.py                 # NeutralAtomsEnv: layer-level MDP with per-qubit placement
+├── map_generator.py       # Random board + task generation for larger maps (Maps 3+)
+├── augmentation.py        # Board symmetry augmentations for training data
 ├── game.py                # Game: episode wrapper with history, targets, search stats
 ├── mcts.py                # MCTS: tree search, UCB, expansion, backprop, temperature decay
 ├── network.py             # MLPMixer value/policy nets, EMA, FakeNet, make_features
@@ -169,7 +178,7 @@ target = game.make_target(i, td_steps)         # TD return + MCTS policy target
 | `mcts.temperature_init/final` | 2.0 / 0.25 | Action selection temperature (linear decay) |
 | `mcts.temperature_decay_steps` | 1000 | Steps over which temperature decays |
 | `training.num_selfplay` | 20 | Games per epoch |
-| `training.buffer_size` | 1000 | Replay buffer capacity |
+| `training.buffer_size` | 50000 | Replay buffer capacity |
 | `training.batch_size` | 128 | Training batch size |
 | `training.training_steps` | 200 | Gradient steps per epoch |
 | `training.td_steps` | 5 | TD bootstrap horizon |
@@ -190,10 +199,14 @@ Defined in `config.py` as `MAPS` list. Each map specifies:
 - `atom_map`: flat indices for initial atom placement
 - `tasks`: list of gate layers, each a list of `[q1, q2]` pairs
 
-| Map | Board | Qubits | Layers | Episode length | Action space |
-|-----|-------|--------|--------|---------------|--------------|
-| 0 | 2x6 | 9 | 3 | 22 | 12 |
-| 1 | 4x4 | 8 | 3 | 24 | 16 |
-| 2 | 5x5 | 12 | 3 | ~30 | 25 |
+| Map | Board | Qubits | Layers | Episode length | Action space | Notes |
+|-----|-------|--------|--------|---------------|--------------|-------|
+| 0 | 2x6 | 9 | 3 | 22 | 12 | Fixed board |
+| 1 | 4x4 | 8 | 3 | 24 | 16 | Fixed board |
+| 2 | 5x5 | 12 | 3 | ~30 | 25 | Fixed board |
+| 3 | 8x8 | 20 | 5 | ~50 | 64 | Generated (seed=42, 10 gates/layer) |
+| 4 | 8x8 | 30 | 5 | ~75 | 64 | Generated (seed=42, 15 gates/layer) |
+
+Maps 3 and 4 have `atom_map=None` — boards and tasks are generated via `map_generator.generate_random_map` at startup using a fixed seed for reproducibility.
 
 Derived values (set by `set_derived_config`): `env.board_height/width/num_qubits`, `network.num_tasks/num_qubits/board_size/num_actions`.

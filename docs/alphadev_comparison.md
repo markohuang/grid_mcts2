@@ -6,13 +6,13 @@ AlphaDev (sorting assembly programs) is the closest reference implementation to 
 
 | | AlphaDev | NeutralAtoms |
 |---|---|---|
-| **State** | Program (list of instructions) + execution state (memory, registers) | Board (atom positions) + tasks_done + current_phase_moves |
-| **Action** | Append an assembly instruction | Execute gate layer (action 0) or move qubit q to cell p (action 1+) |
-| **Terminal** | All test cases pass OR max program length | All task layers executed OR budget exhausted |
-| **Episode length** | Up to `max_program_size` (100) | Up to `budget` (24) |
-| **Action space** | 271 (fixed) | 109 for map 0, 129 for map 1 (varies by map) |
+| **State** | Program (list of instructions) + execution state (memory, registers) | Board (atom positions) + tasks_done + current_atom_idx + current_phase_moves |
+| **Action** | Append an assembly instruction | Cell index (0..board_size-1) for the current qubit |
+| **Terminal** | All test cases pass OR max program length | All task layers auto-executed (deterministic) |
+| **Episode length** | Up to `max_program_size` (100) | `sum(k_t)` — fixed per map (e.g., 22 for Map 0, 24 for Map 1) |
+| **Action space** | 271 (fixed) | `board_size`: 12 for Map 0, 16 for Map 1, 25 for Map 2, 64 for Maps 3/4 |
 
-Both are sequential decision problems where the agent builds a solution step by step. Key structural difference: AlphaDev actions are always "append" (program grows monotonically), while NeutralAtoms has two action types (execute vs move) with the execute action being irreversible (advances `tasks_done`).
+Both are sequential decision problems where the agent builds a solution step by step. Key structural differences: AlphaDev actions are always "append" (program grows monotonically) while NeutralAtoms actions place one qubit at a time in a fixed order, with layers auto-executing after all relevant qubits are placed. NeutralAtoms has no explicit "execute" action and 100% episode completion by construction.
 
 ## Reward Structure — THE Critical Comparison
 
@@ -36,17 +36,20 @@ The correctness reward is **dense and incremental** — every instruction that p
 ### NeutralAtoms
 
 ```
-correctness_reward (per-step):
-    reward = reward_scale * (prev_cost - curr_cost)
-    # cost = compute_total_cost(remaining_layers)
+correctness_reward (per-step, plan_cost mode):
+    cost_before = _compute_remaining_cost()   # BEFORE the move
+    # apply move
+    cost_after  = _compute_remaining_cost()   # AFTER move, BEFORE auto-execute
+    reward = reward_scale * (cost_before - cost_after)
+    # then: tasks_done++, current_phase_moves cleared — no reward for this
 
 latency_reward (terminal-only, ONLY if all tasks completed):
-    reward = -final_total_cost
+    reward = -total_move_distance / episode_length
 ```
 
-**Weights**: `reward_scale = 1.0`, no separate weighting for correctness vs latency heads.
+**Weights**: `reward_scale = 1.0`, `correctness_weight = 1.0`, `latency_weight = 0.1`.
 
-The correctness reward is the cost delta from `compute_total_cost`, which simulates all remaining gate layers and counts parallel groups. This is dense but has a problem: reconfig moves often INCREASE total cost (adding a reconfig group) even when they improve gate parallelism, making the immediate reward negative.
+`_compute_remaining_cost()` sums layer costs for all remaining layers. Computing reward before auto-execute avoids the telescoping-sum problem (see `docs/reward_analysis.md`). The remaining-cost view provides cross-layer signal directly in the reward, unlike older versions.
 
 ### Key Differences
 
@@ -85,48 +88,32 @@ target_correctness = (1 - bd) * tc + 0.5 * bd * (tc + bootstrap_cv)
 target_latency = latency_value  # no bootstrap (matches AlphaDev)
 ```
 
-### **BUG: Bootstrap formula is wrong**
+### Bootstrap formula
 
-Expanding our formula with `bd = bootstrap_discount`, `tc = td_return`, `bcv = V_target(s_{t+n})`:
+**Fixed.** Current implementation (`network.py`):
 
+```python
+target_correctness = (target_correctness + bootstrap_discount * bootstrap_cv).clip(value_min, value_max)
 ```
-result = (1 - bd) * tc + 0.5 * bd * (tc + bcv)
-       = tc * (1 - 0.5 * bd) + 0.5 * bd * bcv
-```
 
-When `bd = 1` (non-terminal, discount=1.0): `result = 0.5 * tc + 0.5 * bcv`
-
-**AlphaDev standard**: `result = tc + bd * bcv = tc + bcv`
-
-Our formula produces targets that are roughly **half** the correct value. The network learns compressed value estimates. This doesn't break training entirely (the network can still learn relative ordering), but it:
-- Wastes representational capacity (all values squeezed into half the bin range)
-- Makes the value head less informative for MCTS (UCB scores are diluted)
-- Means `known_bounds` of [-6, 6] are miscalibrated
-
-**Fix**: Replace with `target_correctness = tc + bd * bootstrap_cv`.
+This is `tc + bd * bcv` — the correct AlphaDev standard formula.
 
 ## Categorical Value Distribution
 
 | | AlphaDev | NeutralAtoms |
 |---|---|---|
-| **Range** | [-3, 3] | [-25, 25] |
-| **Bins** | 301 | 51 |
-| **Resolution** | ~0.02 per bin | ~1.0 per bin |
-| **Encoding** | Two-hot (interpolation) | One-hot (hard assignment) |
+| **Range** | [-3, 3] | [-20, 5] |
+| **Bins** | 301 | 101 |
+| **Resolution** | ~0.02 per bin | ~0.25 per bin |
+| **Encoding** | Two-hot (interpolation) | Two-hot (interpolation) |
 
-### Two-hot vs One-hot
+### Two-hot encoding
 
-AlphaDev uses `scalar_to_two_hot`: for a target value between bins i and i+1, it distributes probability proportionally to both bins. This preserves gradient flow — a value of 3.7 provides gradient signal to both the bin at 3.0 and the bin at 4.0.
-
-Our `to_onehot` uses `torch.bucketize` to find the nearest bin and creates a hard one-hot. A target of 3.7 assigns all probability to whichever bin is closest. This loses information and creates a discretization bias.
-
-**Fix**: Implement two-hot encoding (linear interpolation between adjacent bins).
+**Fixed.** Both now use two-hot encoding. `Network.scalar_to_two_hot` distributes probability between the two adjacent bins proportional to distance, matching AlphaDev's approach.
 
 ### Resolution
 
-With cost values typically in [6, 24] and cost deltas in [-6, 6], our 51 bins over [-25, 25] give ~1.0 resolution. A reconfig move that reduces future gate cost by 0.3 (below our bin resolution) produces no meaningful gradient. AlphaDev's 301 bins over [-3, 3] give 50x finer resolution.
-
-**Fix**: Either increase bins (e.g., 201) or tighten range to match actual value distribution (e.g., [-10, 10] with 101 bins).
+With `plan_cost` reward mode, typical per-step reward magnitudes are in [-5, +2] and value targets are in [-20, 5]. 101 bins over [-20, 5] gives ~0.25 resolution — fine enough for meaningful gradient signal on single-move improvements.
 
 ## MCTS Implementation
 
@@ -184,11 +171,14 @@ Our approach eagerly materializes all transitions when saving a game. This makes
 
 Both use the same learning rate. Adam is more forgiving of hyperparameter choices and adapts per-parameter learning rates, which is helpful for small-scale training. SGD + momentum can generalize better at scale but requires more careful tuning.
 
-## Summary of Action Items (priority order)
+## Summary of Action Items
 
-1. **Fix bootstrap formula** — this is a bug that halves value targets
-2. **Implement two-hot encoding** — improves gradient flow for value learning
-3. **Add reward weighting config** — `correctness_weight`, `latency_weight` for the combined value
-4. **Cache observations in self-play** — eliminates O(N²) waste in save_game
-5. **Tighten value bins** — increase resolution to match actual value range
-6. **Experiment with more simulations** — 50 is likely too few for 109-129 action space
+| Item | Status |
+|------|--------|
+| Fix bootstrap formula (`tc + bd * bcv`) | **Done** |
+| Implement two-hot encoding | **Done** |
+| Add reward weighting config (`correctness_weight`, `latency_weight`) | **Done** (defaults: 1.0, 0.1) |
+| Tighten value bins (range + resolution) | **Done** ([-20, 5], 101 bins) |
+| Fix telescoping reward (plan_cost mode) | **Done** |
+| Cache observations in self-play (eliminate O(N²) replay) | Open |
+| Scale up simulations (50 is sparse for larger maps) | Open (experiments use 100–200) |
