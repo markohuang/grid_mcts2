@@ -97,6 +97,56 @@ export async function computeAllLayers(data: SimulationData): Promise<ComputeAll
   return response.json();
 }
 
+export interface GeneratePlanResponse {
+  board: SimulationData['board'];
+  circuit: number[][][];
+  plan: Array<Array<{ atom: number; from?: { row: number; col: number }; to: { row: number; col: number } }>>;
+  method: string;
+  elapsed_ms: number;
+}
+
+/**
+ * Generate a random board and circuit via the backend
+ */
+export async function randomBoard(params: {
+  rows?: number;
+  cols?: number;
+  num_qubits?: number;
+  num_layers?: number;
+  gates_per_layer?: number;
+  seed?: number;
+}): Promise<{ board: SimulationData['board']; circuit: number[][][] }> {
+  const response = await fetch(`${API_BASE}/random_board`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) throw new Error(`API error: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Generate a plan using kohei, dpqa, or mcts
+ */
+export async function generatePlan(params: {
+  board: SimulationData['board'];
+  circuit: number[][][];
+  method: 'kohei' | 'mcts';
+  checkpoint_path?: string;
+  num_simulations?: number;
+}): Promise<GeneratePlanResponse> {
+  const response = await fetch(`${API_BASE}/generate_plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(err.detail ?? `API error: ${response.status}`);
+  }
+  return response.json();
+}
+
 /**
  * Check if API is available
  */

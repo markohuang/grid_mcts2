@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Grid } from './Grid';
-import { Position, Move, AtomPositions, SimulationData } from './types';
-import { computeAllLayers, checkApiHealth, ComputeAllResponse } from './api';
+import { Position, Move, AtomPositions, SimulationData, Circuit } from './types';
+import { computeAllLayers, checkApiHealth, ComputeAllResponse, randomBoard, generatePlan, GeneratePlanResponse } from './api';
 import { PlaybackTab } from './animation';
 
 const STORAGE_KEY = 'atom-viz-state';
@@ -21,6 +21,11 @@ const App: React.FC = () => {
   const [baselineCost, setBaselineCost] = useState<number | null>(null);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [generateParams, setGenerateParams] = useState({ rows: 3, cols: 10, qubits: 9, tasks: 5 });
+  const [showPlanModal, setShowPlanModal] = useState(false);
+  const [planMethod, setPlanMethod] = useState<'kohei' | 'mcts'>('kohei');
+  const [planGenerating, setPlanGenerating] = useState(false);
+  const [planResult, setPlanResult] = useState<GeneratePlanResponse | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -416,6 +421,56 @@ const App: React.FC = () => {
     setShowGenerateModal(false);
   };
 
+  // Random board via backend (5x5, 3 layers, 4 gates/layer)
+  const handleRandomBoard = async () => {
+    try {
+      const result = await randomBoard({ rows: 5, cols: 5, num_qubits: 12, num_layers: 3, gates_per_layer: 4 });
+      const newData: SimulationData = { ...result as unknown as SimulationData, plan: result.circuit.map(() => []) };
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(BASELINE_COST_KEY);
+      setBaselineCost(null);
+      setData(newData);
+      setCurrentTaskIndex(-1);
+      setSelectedAtom(null);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  // Generate plan via backend
+  const handleGeneratePlan = async () => {
+    if (!data) return;
+    setPlanGenerating(true);
+    setPlanResult(null);
+    setPlanError(null);
+    try {
+      const result = await generatePlan({ board: data.board, circuit: data.circuit, method: planMethod });
+      setPlanResult(result);
+    } catch (e: any) {
+      setPlanError(e.message);
+    } finally {
+      setPlanGenerating(false);
+    }
+  };
+
+  // Apply generated plan to current data
+  const handleApplyPlan = () => {
+    if (!planResult) return;
+    const newData = {
+      board: planResult.board,
+      circuit: planResult.circuit as unknown as Circuit,
+      plan: planResult.plan.map(layer => layer.map(m => ({ ...m, from: m.from! }))) as Move[][],
+    } as SimulationData;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(BASELINE_COST_KEY);
+    setBaselineCost(null);
+    setData(newData);
+    setCurrentTaskIndex(-1);
+    setSelectedAtom(null);
+    setShowPlanModal(false);
+    setPlanResult(null);
+  };
+
   // Import/Export
   const handleExport = () => {
     if (!data) return;
@@ -553,6 +608,14 @@ const App: React.FC = () => {
 
           <button onClick={() => setShowGenerateModal(true)} style={{ padding: '8px 12px', fontSize: '13px', background: '#6c5ce7', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
             Generate
+          </button>
+
+          <button onClick={handleRandomBoard} disabled={apiStatus !== 'connected'} style={{ padding: '8px 12px', fontSize: '13px', background: '#6c5ce7', color: '#fff', border: 'none', borderRadius: '6px', cursor: apiStatus === 'connected' ? 'pointer' : 'not-allowed', opacity: apiStatus === 'connected' ? 1 : 0.5 }}>
+            Random 5×5
+          </button>
+
+          <button onClick={() => { setShowPlanModal(true); setPlanResult(null); setPlanError(null); }} disabled={apiStatus !== 'connected' || !data} style={{ padding: '8px 12px', fontSize: '13px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: (apiStatus === 'connected' && data) ? 'pointer' : 'not-allowed', opacity: (apiStatus === 'connected' && data) ? 1 : 0.5 }}>
+            Generate Plan
           </button>
 
           <input type="file" ref={fileInputRef} onChange={handleImport} accept=".json" style={{ display: 'none' }} />
@@ -817,6 +880,58 @@ const App: React.FC = () => {
           <PlaybackTab data={data} computed={computed} />
         )}
       </div>
+
+      {/* Generate Plan Modal */}
+      {showPlanModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#161c24', padding: '24px', borderRadius: '12px', border: '1px solid #e17055', minWidth: '360px', maxWidth: '480px' }}>
+            <h2 style={{ margin: '0 0 20px', color: '#e17055' }}>Generate Plan</h2>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ color: '#6b7280', fontSize: '13px', display: 'block', marginBottom: '8px' }}>Method</label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {(['kohei', 'mcts'] as const).map(m => (
+                  <button key={m} onClick={() => setPlanMethod(m)} style={{ flex: 1, padding: '8px', background: planMethod === m ? '#e17055' : '#2a3444', color: planMethod === m ? '#fff' : '#9ca3af', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: planMethod === m ? '600' : '400', textTransform: 'uppercase', fontSize: '12px' }}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: '8px', fontSize: '12px', color: '#6b7280' }}>
+                {planMethod === 'kohei' && 'Greedy placement using gate parallelism gain vectors. Fast, no model required.'}
+                {planMethod === 'mcts' && 'MCTS with trained neural network. Requires a trained model checkpoint.'}
+              </div>
+            </div>
+
+            {planError && (
+              <div style={{ background: '#2a1a1a', border: '1px solid #e17055', borderRadius: '6px', padding: '10px', marginBottom: '12px', color: '#ff7675', fontSize: '13px' }}>
+                {planError}
+              </div>
+            )}
+
+            {planResult && !planError && (
+              <div style={{ background: '#1a2a1a', border: '1px solid #4ecdc4', borderRadius: '6px', padding: '10px', marginBottom: '12px', fontSize: '13px', color: '#4ecdc4' }}>
+                <div>Method: <strong>{planResult.method.toUpperCase()}</strong></div>
+                <div>Elapsed: <strong>{planResult.elapsed_ms.toFixed(0)} ms</strong></div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
+              <button onClick={() => setShowPlanModal(false)} style={{ flex: 1, padding: '10px', background: '#2a3444', color: '#e8e8e8', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
+                {planResult ? 'Close' : 'Cancel'}
+              </button>
+              {planResult ? (
+                <button onClick={handleApplyPlan} style={{ flex: 1, padding: '10px', background: '#4ecdc4', color: '#0a0e14', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '600' }}>
+                  Apply Plan
+                </button>
+              ) : (
+                <button onClick={handleGeneratePlan} disabled={planGenerating} style={{ flex: 1, padding: '10px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: planGenerating ? 'not-allowed' : 'pointer', fontWeight: '600', opacity: planGenerating ? 0.7 : 1 }}>
+                  {planGenerating ? 'Generating…' : 'Generate'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Generate Modal */}
       {showGenerateModal && (

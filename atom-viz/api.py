@@ -20,16 +20,21 @@ Requires neutral_atoms package in parent directory:
 import sys
 from pathlib import Path
 
-# Add parent directory to path for neutral_atoms imports
+# Add parent directory to path for neutral_atoms + baselines imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import torch
 
 # Import from neutral_atoms package
 from neutral_atoms.moves import parallel_groups, count_groups, canonicalize_moves
+
+# Import baselines
+from baselines.random_board import random_board as _random_board
+from baselines.kohei_policy import plan as kohei_plan
 
 app = FastAPI(title="Neutral Atoms Viz API")
 
@@ -89,6 +94,28 @@ class LayerResult(BaseModel):
 class ComputeAllResponse(BaseModel):
     layers: list[LayerResult]
     totalCost: int
+
+class RandomBoardRequest(BaseModel):
+    rows: int = 5
+    cols: int = 5
+    num_qubits: int = 12
+    num_layers: int = 3
+    gates_per_layer: int = 4
+    seed: Optional[int] = None
+
+class GeneratePlanRequest(BaseModel):
+    board: dict
+    circuit: list
+    method: str  # "kohei" | "mcts"
+    checkpoint_path: Optional[str] = None
+    num_simulations: Optional[int] = 50
+
+class GeneratePlanResponse(BaseModel):
+    board: dict
+    circuit: list
+    plan: list
+    method: str
+    elapsed_ms: float
 
 # ============================================================================
 # Helper Functions
@@ -311,6 +338,54 @@ def compute_all_layers(data: dict) -> dict:
         "totalCost": total_cost,
         "validatedPlan": validated_plan  # Return validated plan for frontend to sync
     }
+
+# ============================================================================
+# Baseline endpoints
+# ============================================================================
+
+@app.post("/random_board")
+def random_board_endpoint(request: RandomBoardRequest) -> dict:
+    """Generate a random board + circuit in atom-viz format."""
+    return _random_board(
+        rows=request.rows,
+        cols=request.cols,
+        num_qubits=request.num_qubits,
+        num_layers=request.num_layers,
+        gates_per_layer=request.gates_per_layer,
+        seed=request.seed,
+    )
+
+@app.post("/generate_plan", response_model=GeneratePlanResponse)
+def generate_plan(request: GeneratePlanRequest) -> dict:
+    """Generate a plan using the specified method (kohei | dpqa | mcts)."""
+    import time
+
+    board = request.board
+    circuit = request.circuit
+    rows, cols = board["rows"], board["cols"]
+    initial = {int(k): (v["row"], v["col"])
+               for k, v in board["initialAtoms"].items()}
+    tasks = [[(g[0], g[1]) for g in layer] for layer in circuit]
+
+    t0 = time.time()
+
+    if request.method == "kohei":
+        result = kohei_plan(initial, tasks, rows, cols)
+        return GeneratePlanResponse(
+            board=result["board"],
+            circuit=result["circuit"],
+            plan=result["plan"],
+            method="kohei",
+            elapsed_ms=(time.time() - t0) * 1000,
+        )
+
+    elif request.method == "mcts":
+        raise HTTPException(status_code=501,
+                            detail="MCTS inference not yet available — train a model first.")
+
+    else:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown method '{request.method}'. Use: kohei, mcts.")
 
 # ============================================================================
 # Run server
