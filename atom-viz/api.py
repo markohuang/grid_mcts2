@@ -30,11 +30,12 @@ from typing import Optional
 import torch
 
 # Import from neutral_atoms package
-from neutral_atoms.moves import parallel_groups, count_groups, canonicalize_moves
+from neutral_atoms.moves import parallel_groups, count_groups, canonicalize_moves, optimal_count_groups
 
 # Import baselines
 from baselines.random_board import random_board as _random_board
-from baselines.kohei_policy import plan as kohei_plan
+from baselines.kouhei_policy import plan as kouhei_plan
+from baselines.smt_policy import plan as smt_plan
 
 app = FastAPI(title="Neutral Atoms Viz API")
 
@@ -106,9 +107,10 @@ class RandomBoardRequest(BaseModel):
 class GeneratePlanRequest(BaseModel):
     board: dict
     circuit: list
-    method: str  # "kohei" | "mcts"
+    method: str  # "kouhei" | "smt" | "mcts"
     checkpoint_path: Optional[str] = None
     num_simulations: Optional[int] = 50
+    smt_timeout_ms: Optional[int] = 30_000
 
 class GeneratePlanResponse(BaseModel):
     board: dict
@@ -116,6 +118,7 @@ class GeneratePlanResponse(BaseModel):
     plan: list
     method: str
     elapsed_ms: float
+    plan_cost: Optional[int] = None  # optimal cost (chromatic number) — matches display
 
 # ============================================================================
 # Helper Functions
@@ -126,6 +129,27 @@ def moves_list_to_tensor(moves_list: list[list[int]]) -> torch.Tensor:
     if not moves_list:
         return torch.empty(0, 4, dtype=torch.long)
     return torch.tensor(moves_list, dtype=torch.long)
+
+def _compute_plan_cost(board: dict, circuit: list, plan: list) -> int:
+    """Compute total optimal cost of a plan (chromatic number)."""
+    atom_positions = {int(k): v for k, v in board["initialAtoms"].items()}
+    total = 0
+    cur_pos = {q: {"row": p["row"], "col": p["col"]} for q, p in atom_positions.items()}
+    for layer_idx, gates in enumerate(circuit):
+        layer_moves = plan[layer_idx] if layer_idx < len(plan) else []
+        valid_moves = [m for m in layer_moves
+                       if cur_pos.get(m["atom"]) is not None
+                       and cur_pos[m["atom"]]["row"] == m.get("from", cur_pos[m["atom"]])["row"]
+                       and cur_pos[m["atom"]]["col"] == m.get("from", cur_pos[m["atom"]])["col"]]
+        if valid_moves:
+            ml = [[m["from"]["row"], m["from"]["col"], m["to"]["row"], m["to"]["col"]] for m in valid_moves]
+            total += optimal_count_groups(moves_list_to_tensor(ml), canonicalize=False)
+            for m in valid_moves:
+                cur_pos[m["atom"]] = {"row": m["to"]["row"], "col": m["to"]["col"]}
+        if gates:
+            pos_str = {str(k): v for k, v in cur_pos.items()}
+            total += 2 * optimal_count_groups(gates_to_moves_tensor(gates, pos_str), canonicalize=True)
+    return total
 
 def gates_to_moves_tensor(gates: list[list[int]], atom_positions: dict[str, dict]) -> torch.Tensor:
     """Convert gates to moves tensor: first atom moves to second atom's position."""
@@ -163,17 +187,17 @@ def compute(request: ComputeRequest):
             moves_list.append([m.frm.row, m.frm.col, m.to.row, m.to.col])
         moves_tensor = moves_list_to_tensor(moves_list)
         groups = parallel_groups(moves_tensor, canonicalize=False).tolist()
-        num_groups = count_groups(moves_tensor, canonicalize=False)
-        cost = num_groups  # reconfig cost = number of groups
+        num_groups = optimal_count_groups(moves_tensor, canonicalize=False)
+        cost = num_groups
         reconfig_result = GroupResult(groups=groups, cost=cost, numGroups=num_groups)
         total_cost += cost
-    
+
     # Process gate execution (canonicalize=True)
     if request.gate and len(request.gate.gates) > 0:
         moves_tensor = gates_to_moves_tensor(request.gate.gates, request.gate.atomPositions)
         groups = parallel_groups(moves_tensor, canonicalize=True).tolist()
-        num_groups = count_groups(moves_tensor, canonicalize=True)
-        cost = 2 * num_groups  # gate cost = 2x (round trip)
+        num_groups = optimal_count_groups(moves_tensor, canonicalize=True)
+        cost = 2 * num_groups
         gate_result = GroupResult(groups=groups, cost=cost, numGroups=num_groups)
         total_cost += cost
     
@@ -216,48 +240,42 @@ def compute_all_layers(data: dict) -> dict:
     for layer_idx, gates in enumerate(circuit):
         layer_moves = plan[layer_idx] if layer_idx < len(plan) else []
         
-        # Validate moves for this layer
+        # Validate moves for this layer.
+        # Pre-compute which atoms have ANY planned move this layer so that occupancy
+        # checks are order-independent (reconfig moves execute simultaneously).
+        atoms_with_planned_move = {m["atom"] for m in layer_moves}
         valid_moves = []
         planned_destinations = set()  # Track destinations to prevent collisions
-        atoms_being_moved = set()  # Track which atoms have moves
-        
+
         for m in layer_moves:
             atom_id = m["atom"]
             expected_from = atom_positions.get(atom_id)
             move_from = m.get("from", expected_from)
             move_to = m["to"]
-            
+
             # Check 1: Move starts from atom's current position
             if expected_from is None:
                 continue
             if move_from["row"] != expected_from["row"] or move_from["col"] != expected_from["col"]:
                 continue  # Invalid: atom is not at expected position
-            
-            # Check 2: Destination not already planned by another move in this layer
+
+            # Check 2: Destination not already claimed by another move in this layer
             dest_key = (move_to["row"], move_to["col"])
             if dest_key in planned_destinations:
-                continue  # Invalid: collision with another planned move
-            
-            # Check 3: Destination not occupied by unmoved atom
-            is_occupied = False
-            for other_id, other_pos in atom_positions.items():
-                if other_id == atom_id:
-                    continue
-                other_at_dest = (other_pos["row"] == move_to["row"] and 
-                                other_pos["col"] == move_to["col"])
-                # Check if other atom is being moved away from this position
-                other_being_moved_away = False
-                for vm in valid_moves:
-                    if vm["atom"] == other_id:
-                        other_being_moved_away = True
-                        break
-                
-                if other_at_dest and not other_being_moved_away:
-                    is_occupied = True
-                    break
-            
+                continue  # Invalid: two moves target the same cell
+
+            # Check 3: Destination not occupied by a truly stationary atom.
+            # Any atom that has a planned move will vacate its current cell, so it
+            # does not block another atom from moving into that cell.
+            is_occupied = any(
+                other_id != atom_id
+                and other_pos["row"] == move_to["row"]
+                and other_pos["col"] == move_to["col"]
+                and other_id not in atoms_with_planned_move
+                for other_id, other_pos in atom_positions.items()
+            )
             if is_occupied:
-                continue  # Invalid: destination occupied by unmoved atom
+                continue  # Invalid: destination occupied by stationary atom
             
             # Move is valid
             valid_moves.append({
@@ -266,7 +284,6 @@ def compute_all_layers(data: dict) -> dict:
                 "to": {"row": move_to["row"], "col": move_to["col"]}
             })
             planned_destinations.add(dest_key)
-            atoms_being_moved.add(atom_id)
         
         validated_plan.append(valid_moves)
         
@@ -284,11 +301,11 @@ def compute_all_layers(data: dict) -> dict:
         }
         
         if valid_moves:
-            moves_list = [[m["from"]["row"], m["from"]["col"], m["to"]["row"], m["to"]["col"]] 
+            moves_list = [[m["from"]["row"], m["from"]["col"], m["to"]["row"], m["to"]["col"]]
                          for m in valid_moves]
             moves_tensor = moves_list_to_tensor(moves_list)
             groups = parallel_groups(moves_tensor, canonicalize=False).tolist()
-            cost = count_groups(moves_tensor, canonicalize=False)
+            cost = optimal_count_groups(moves_tensor, canonicalize=False)
             layer_result["reconfigGroups"] = groups
             layer_result["reconfigCost"] = cost
             total_cost += cost
@@ -302,12 +319,13 @@ def compute_all_layers(data: dict) -> dict:
             # Convert atom_positions to string keys for helper
             pos_str_keys = {str(k): v for k, v in atom_positions.items()}
             moves_tensor = gates_to_moves_tensor(gates, pos_str_keys)
-            
-            # Canonicalize the moves for optimal grouping
+
+            # Optimal cost: enumerate all direction assignments
+            num_groups = optimal_count_groups(moves_tensor, canonicalize=True)
+            cost = 2 * num_groups
+            # Group assignments for visualization (greedy on canonicalized directions)
             canonicalized_tensor = canonicalize_moves(moves_tensor)
             groups = parallel_groups(canonicalized_tensor, canonicalize=False).tolist()
-            num_groups = count_groups(canonicalized_tensor, canonicalize=False)
-            cost = 2 * num_groups
             layer_result["gateGroups"] = groups
             layer_result["gateCost"] = cost
             total_cost += cost
@@ -369,14 +387,31 @@ def generate_plan(request: GeneratePlanRequest) -> dict:
 
     t0 = time.time()
 
-    if request.method == "kohei":
-        result = kohei_plan(initial, tasks, rows, cols)
+    if request.method == "kouhei":
+        result = kouhei_plan(initial, tasks, rows, cols)
+        cost = _compute_plan_cost(result["board"], result["circuit"], result["plan"])
         return GeneratePlanResponse(
             board=result["board"],
             circuit=result["circuit"],
             plan=result["plan"],
-            method="kohei",
+            method="kouhei",
             elapsed_ms=(time.time() - t0) * 1000,
+            plan_cost=cost,
+        )
+
+    elif request.method == "smt":
+        result = smt_plan(initial, tasks, rows, cols,
+                          timeout_ms=request.smt_timeout_ms or 30_000)
+        if result is None:
+            raise HTTPException(status_code=504,
+                                detail="SMT solver timed out — try a smaller board or fewer layers.")
+        return GeneratePlanResponse(
+            board=result["board"],
+            circuit=result["circuit"],
+            plan=result["plan"],
+            method="smt",
+            elapsed_ms=(time.time() - t0) * 1000,
+            plan_cost=result.get("smt_cost"),
         )
 
     elif request.method == "mcts":
@@ -385,7 +420,7 @@ def generate_plan(request: GeneratePlanRequest) -> dict:
 
     else:
         raise HTTPException(status_code=400,
-                            detail=f"Unknown method '{request.method}'. Use: kohei, mcts.")
+                            detail=f"Unknown method '{request.method}'. Use: kouhei, smt, mcts.")
 
 # ============================================================================
 # Run server

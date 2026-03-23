@@ -20,9 +20,9 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'edit' | 'playback'>('edit');
   const [baselineCost, setBaselineCost] = useState<number | null>(null);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
-  const [generateParams, setGenerateParams] = useState({ rows: 3, cols: 10, qubits: 9, tasks: 5 });
+  const [generateParams, setGenerateParams] = useState({ rows: 3, cols: 10, qubits: 9, tasks: 5, gatesPerLayer: 3 });
   const [showPlanModal, setShowPlanModal] = useState(false);
-  const [planMethod, setPlanMethod] = useState<'kohei' | 'mcts'>('kohei');
+  const [planMethod, setPlanMethod] = useState<'kouhei' | 'smt' | 'mcts'>('kouhei');
   const [planGenerating, setPlanGenerating] = useState(false);
   const [planResult, setPlanResult] = useState<GeneratePlanResponse | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
@@ -121,39 +121,13 @@ const App: React.FC = () => {
     }
   }, [data, currentTaskIndex]);
 
-  // Reset handler
-  const handleReset = useCallback(async () => {
-    if (!confirm('Reset all changes and reload from data.json?')) return;
-    
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(BASELINE_COST_KEY);
-    setBaselineCost(null);
-    
-    try {
-      const res = await fetch('/data.json');
-      if (!res.ok) throw new Error('No data.json found');
-      const json: SimulationData = await res.json();
-      while (json.plan.length < json.circuit.length) {
-        json.plan.push([]);
-      }
-      
-      if (apiStatus === 'connected') {
-        try {
-          const emptyPlanData = { ...json, plan: json.circuit.map(() => []) };
-          const result = await computeAllLayers(emptyPlanData);
-          setBaselineCost(result.totalCost);
-          localStorage.setItem(BASELINE_COST_KEY, result.totalCost.toString());
-        } catch (e) {}
-      }
-      
-      setData(json);
-      setCurrentTaskIndex(-1);
-      setSelectedAtom(null);
-      setActiveTab('edit');
-    } catch (err) {
-      setError('Failed to load data.json');
-    }
-  }, [apiStatus]);
+  // Reset handler — clears all reconfig moves, keeps board and circuit
+  const handleReset = useCallback(() => {
+    if (!data) return;
+    setData(d => d ? { ...d, plan: d.circuit.map(() => []) } : d);
+    setCurrentTaskIndex(-1);
+    setSelectedAtom(null);
+  }, [data]);
 
   // Board config mode
   const isBoardConfig = currentTaskIndex === -1;
@@ -372,8 +346,10 @@ const App: React.FC = () => {
 
   // Generate template
   const handleGenerate = () => {
-    const { rows, cols, qubits, tasks } = generateParams;
-    
+    const { rows, cols, qubits, tasks, gatesPerLayer } = generateParams;
+    const maxGates = Math.floor(qubits / 2);
+    const actualGates = Math.min(gatesPerLayer, maxGates);
+
     if (qubits > rows * cols) {
       setError(`Cannot place ${qubits} atoms in ${rows}x${cols} grid`);
       return;
@@ -389,13 +365,12 @@ const App: React.FC = () => {
     const shuffled = allPositions.sort(() => Math.random() - 0.5);
     const positions = shuffled.slice(0, qubits);
 
-    // Generate random gates
+    // Generate random gates — fixed gatesPerLayer independent pairs per layer
     const circuit: [number, number][][] = [];
     for (let t = 0; t < tasks; t++) {
       const available = [...Array(qubits).keys()].sort(() => Math.random() - 0.5);
-      const numGates = Math.floor(Math.random() * (qubits / 2)) + 1;
       const layer: [number, number][] = [];
-      for (let i = 0; i < numGates && available.length >= 2; i++) {
+      for (let i = 0; i < actualGates && available.length >= 2; i++) {
         layer.push([available.pop()!, available.pop()!]);
       }
       if (layer.length > 0) circuit.push(layer);
@@ -890,14 +865,15 @@ const App: React.FC = () => {
             <div style={{ marginBottom: '16px' }}>
               <label style={{ color: '#6b7280', fontSize: '13px', display: 'block', marginBottom: '8px' }}>Method</label>
               <div style={{ display: 'flex', gap: '8px' }}>
-                {(['kohei', 'mcts'] as const).map(m => (
+                {(['kouhei', 'smt', 'mcts'] as const).map(m => (
                   <button key={m} onClick={() => setPlanMethod(m)} style={{ flex: 1, padding: '8px', background: planMethod === m ? '#e17055' : '#2a3444', color: planMethod === m ? '#fff' : '#9ca3af', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: planMethod === m ? '600' : '400', textTransform: 'uppercase', fontSize: '12px' }}>
                     {m}
                   </button>
                 ))}
               </div>
               <div style={{ marginTop: '8px', fontSize: '12px', color: '#6b7280' }}>
-                {planMethod === 'kohei' && 'Greedy placement using gate parallelism gain vectors. Fast, no model required.'}
+                {planMethod === 'kouhei' && 'Greedy placement using gate parallelism gain vectors. Fast, no model required.'}
+                {planMethod === 'smt' && 'Z3 SMT solver — optimal within each layer under the exact AOD non-crossing constraint. Slower (~0.5–2s for 5×5).'}
                 {planMethod === 'mcts' && 'MCTS with trained neural network. Requires a trained model checkpoint.'}
               </div>
             </div>
@@ -912,6 +888,9 @@ const App: React.FC = () => {
               <div style={{ background: '#1a2a1a', border: '1px solid #4ecdc4', borderRadius: '6px', padding: '10px', marginBottom: '12px', fontSize: '13px', color: '#4ecdc4' }}>
                 <div>Method: <strong>{planResult.method.toUpperCase()}</strong></div>
                 <div>Elapsed: <strong>{planResult.elapsed_ms.toFixed(0)} ms</strong></div>
+                {planResult.plan_cost !== undefined && (
+                  <div>Cost: <strong>{planResult.plan_cost}</strong></div>
+                )}
               </div>
             )}
 
@@ -943,7 +922,8 @@ const App: React.FC = () => {
               { label: 'Rows', key: 'rows', min: 1, max: 20 },
               { label: 'Columns', key: 'cols', min: 1, max: 20 },
               { label: 'Qubits', key: 'qubits', min: 1, max: 50 },
-              { label: 'Tasks', key: 'tasks', min: 1, max: 20 },
+              { label: 'Layers', key: 'tasks', min: 1, max: 20 },
+              { label: 'Gates/Layer', key: 'gatesPerLayer', min: 1, max: 25 },
             ].map(({ label, key, min, max }) => (
               <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
                 <label style={{ width: '80px', color: '#6b7280' }}>{label}:</label>

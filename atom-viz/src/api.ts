@@ -103,6 +103,7 @@ export interface GeneratePlanResponse {
   plan: Array<Array<{ atom: number; from?: { row: number; col: number }; to: { row: number; col: number } }>>;
   method: string;
   elapsed_ms: number;
+  plan_cost?: number;  // optimal cost (chromatic number) — matches display
 }
 
 /**
@@ -131,9 +132,10 @@ export async function randomBoard(params: {
 export async function generatePlan(params: {
   board: SimulationData['board'];
   circuit: number[][][];
-  method: 'kohei' | 'mcts';
+  method: 'kouhei' | 'smt' | 'mcts';
   checkpoint_path?: string;
   num_simulations?: number;
+  smt_timeout_ms?: number;
 }): Promise<GeneratePlanResponse> {
   const response = await fetch(`${API_BASE}/generate_plan`, {
     method: 'POST',

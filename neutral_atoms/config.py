@@ -77,7 +77,7 @@ def get_config():
     c.training.epochs = 50
     c.training.num_selfplay = 20
     c.training.buffer_size = 50000
-    c.training.td_steps = 5
+    c.training.td_steps = 5  # for layer_completion reward, set >= max_atoms_per_layer (see set_derived_config)
     c.training.batch_size = 128
     c.training.lr = 2e-4
     c.training.training_steps = 200
@@ -140,6 +140,11 @@ def set_derived_config(config):
         config.network.num_qubits = num_qubits
         config.network.board_size = board_size
         config.network.num_actions = board_size
+        # max atoms per layer = unique qubits in the largest layer (used for td_steps guidance)
+        tasks = m['tasks']
+        config.env.max_atoms_per_layer = max(
+            len({q for pair in layer for q in pair}) for layer in tasks
+        )
 
 
 def get_map_data(config):

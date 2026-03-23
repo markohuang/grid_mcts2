@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from .types import Moves
 from .fast_moves import count_groups_fast, parallel_groups_fast, warmup as _warmup_numba
 
@@ -96,6 +97,50 @@ def parallel_groups(moves: Moves, canonicalize: bool = False) -> torch.Tensor:
 def count_groups(moves: Moves, canonicalize: bool = False) -> int:
     """Returns number of parallel groups. Uses numba fast path."""
     return count_groups_fast(moves, canonicalize)
+
+def _chromatic_number(adj: np.ndarray) -> int:
+    """Exact chromatic number via backtracking. Feasible for N≤15."""
+    N = adj.shape[0]
+    if N == 0:
+        return 0
+    colors = np.full(N, -1, dtype=np.int32)
+    def bt(node, k):
+        if node == N:
+            return True
+        for c in range(k):
+            if not np.any(adj[node, :node] & (colors[:node] == c)):
+                colors[node] = c
+                if bt(node + 1, k):
+                    return True
+                colors[node] = -1
+        return False
+    for k in range(1, N + 1):
+        colors.fill(-1)
+        if bt(0, k):
+            return k
+    return N  # unreachable
+
+def optimal_count_groups(moves: Moves, canonicalize: bool = False) -> int:
+    """Exact minimum parallel groups (chromatic number). Feasible for N≤15.
+    With canonicalize=True, enumerates all 2^N direction assignments."""
+    if len(moves) == 0:
+        return 0
+    if not canonicalize:
+        adj = (~is_parallel_executable_batch(moves))
+        adj.fill_diagonal_(False)
+        return _chromatic_number(adj.numpy())
+    N = len(moves)
+    flipped = torch.stack([moves[:, 2], moves[:, 3], moves[:, 0], moves[:, 1]], dim=1)
+    best = N
+    for mask in range(1 << N):
+        dirs = torch.tensor([(mask >> i) & 1 for i in range(N)], dtype=torch.bool)
+        oriented = torch.where(dirs.unsqueeze(1).expand(-1, 4), flipped, moves)
+        adj = (~is_parallel_executable_batch(oriented))
+        adj.fill_diagonal_(False)
+        best = min(best, _chromatic_number(adj.numpy()))
+        if best == 1:
+            break
+    return best
 
 def group_sizes(moves: Moves, canonicalize: bool = False) -> torch.Tensor:
     if len(moves) == 0:

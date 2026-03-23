@@ -59,7 +59,8 @@ class NeutralAtomsEnv:
         self.num_moves = 0
         self._cost_dirty = True
         if self.reward_mode == 'layer_delta':
-            self._current_layer_cost = self._compute_layer_cost_fast()  # lazy compute _cached_cost only when needed
+            self._current_layer_cost = self._compute_layer_cost_fast()
+            self._layer_initial_cost = self._current_layer_cost  # saved for boundary correction
         self._cached_cost = None
         self._init_board_feat()
         return self._get_observation()
@@ -133,16 +134,23 @@ class NeutralAtomsEnv:
         if self.current_atom_idx >= len(self.relevant_atoms):
             if self.reward_mode == 'layer_completion':
                 reward = -self._compute_layer_cost_fast() * self.reward_scale
+            elif self.reward_mode == 'layer_delta':
+                # Compute BEFORE state transition so we stay within the current layer.
+                # step delta + correction(-initial_layer_cost) → per-layer total = -actual_layer_cost
+                curr_layer_cost = self._compute_layer_cost_fast()
+                reward = ((prev_layer_cost - curr_layer_cost) - self._layer_initial_cost) * self.reward_scale
             self.tasks_done += 1
             self.current_atom_idx = 0
             self.current_phase_moves = []
-
-        # Compute reward for other modes (after auto-execute)
-        if self.reward_mode == 'layer_delta':
+            if self.reward_mode == 'layer_delta':
+                self._current_layer_cost = self._compute_layer_cost_fast()  # initial cost of new layer
+                self._layer_initial_cost = self._current_layer_cost
+        elif self.reward_mode == 'layer_delta':
             curr_layer_cost = self._compute_layer_cost_fast()
             reward = (prev_layer_cost - curr_layer_cost) * self.reward_scale
             self._current_layer_cost = curr_layer_cost
-        elif self.reward_mode == 'remaining_cost':
+
+        if self.reward_mode == 'remaining_cost':
             reward = -self._compute_remaining_cost() / self.episode_length * self.reward_scale
 
         self._cost_dirty = True
@@ -255,6 +263,7 @@ class NeutralAtomsEnv:
         new_env.entropy_weight = self.entropy_weight
         if self.reward_mode == 'layer_delta':
             new_env._current_layer_cost = self._current_layer_cost
+            new_env._layer_initial_cost = self._layer_initial_cost
         new_env._cost_dirty = True
         new_env._cached_cost = None
         return new_env
