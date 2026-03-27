@@ -184,25 +184,34 @@ def gate_feasibility(gate_atoms, placement_dists, H, W):
     }
 
 
-def gate_cost_surrogate(gate_atoms, placement_dists, H, W, lambda_g=1.0):
+def gate_cost_surrogate(gate_atoms, placement_dists, H, W,
+                        lambda_g=1.0, lambda_aux=0.0):
     """Differentiable gate cost surrogate.
 
-    cost = 2 + λ_g · (-log F_gate)
+    cost = 2 + λ_g · (-log F_gate) + λ_aux · conflict_count
 
-    When F_gate = 1 (all gates compatible): cost = 2 (optimal).
-    When F_gate < 1: cost > 2, proportional to infeasibility.
+    The -log F term provides exact signal at the feasibility boundary (F=1).
+    The conflict_count term provides gradient proportional to the number of
+    violated constraints, giving better signal in the deep infeasible region.
 
     Args:
         gate_atoms: list of (atom_a, atom_b) per gate
         placement_dists: (N, C) distributions
         H, W: grid dims
-        lambda_g: penalty weight for infeasibility
+        lambda_g: weight for feasibility penalty (-log F)
+        lambda_aux: weight for conflict count auxiliary loss
 
     Returns: (cost, info_dict)
     """
     F_gate, info = gate_feasibility(gate_atoms, placement_dists, H, W)
-    neg_log_F = -info['log_F']  # = -log ∏ P_ij = Σ (-log P_ij)
+    neg_log_F = -info['log_F']
     cost = 2.0 + lambda_g * neg_log_F
+
+    # Auxiliary: conflict count under best direction
+    if lambda_aux > 0:
+        conflict_count = info.get('conflict_count', torch.tensor(0.0))
+        cost = cost + lambda_aux * conflict_count
+
     info['F_gate'] = F_gate
     info['neg_log_F'] = neg_log_F
     return cost, info
@@ -248,6 +257,7 @@ def reconfig_feasibility(src_dists, dst_dists, H, W, mover_indices=None):
 
     # Log-product of pairwise compat, weighted by P(both move)
     log_F = torch.tensor(0.0, device=device, dtype=dtype)
+    conflict_count = torch.tensor(0.0, device=device, dtype=dtype)
     n_active_pairs = 0
 
     for ii in range(M):
@@ -262,21 +272,16 @@ def reconfig_feasibility(src_dists, dst_dists, H, W, mover_indices=None):
 
             n_active_pairs += 1
 
-            # P(compatible | both move)
-            # Note: the conditional "both move" means both src ≠ dst.
-            # We compute P(compat) over all (src, dst) pairs including no-ops.
-            # When one doesn't move, compat is automatically high (same src=dst
-            # means the "move" has zero displacement).
-            # The p_both weighting handles the importance correctly.
             p = pairwise_full_compat_prob(
                 src_dists[qi], dst_dists[qi],
                 src_dists[qj], dst_dists[qj], H, W)
 
-            # Weighted contribution: interpolate between 1 (no conflict if
-            # neither moves) and p (actual compat if both move)
-            # log(1 · (1-p_both) + p · p_both) ≈ p_both · log(p) for small p_both
+            # Weighted contribution
             effective_p = (1.0 - p_both) + p_both * p
             log_F = log_F + torch.log(effective_p.clamp(min=1e-30))
+
+            # Conflict count: expected number of conflicting mover pairs
+            conflict_count = conflict_count + p_both * (1.0 - p)
 
     F_reconfig = torch.exp(log_F)
 
@@ -285,11 +290,12 @@ def reconfig_feasibility(src_dists, dst_dists, H, W, mover_indices=None):
         'n_movers': n_movers,
         'n_active_pairs': n_active_pairs,
         'p_move': p_move,
+        'conflict_count': conflict_count,
     }
 
 
 def reconfig_cost_surrogate(src_dists, dst_dists, H, W,
-                             mover_indices=None, lambda_r=1.0):
+                             mover_indices=None, lambda_r=1.0, lambda_aux=0.0):
     """Differentiable reconfig cost surrogate.
 
     cost = P(any atom moves) · (1 + λ_r · (-log F_reconfig))
@@ -331,7 +337,8 @@ def reconfig_cost_surrogate(src_dists, dst_dists, H, W,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def layer_cost_surrogate(prev_dists, curr_dists, gate_atoms, H, W,
-                          mover_indices=None, lambda_g=1.0, lambda_r=1.0):
+                          mover_indices=None,
+                          lambda_g=1.0, lambda_r=1.0, lambda_aux=0.0):
     """Combined surrogate cost for one layer.
 
     cost = reconfig_cost(prev → curr) + gate_cost(curr)
@@ -342,18 +349,21 @@ def layer_cost_surrogate(prev_dists, curr_dists, gate_atoms, H, W,
         gate_atoms: list of (atom_a, atom_b) for this layer's gates
         H, W: grid dims
         mover_indices: atoms considered for reconfig (default: all)
-        lambda_g, lambda_r: penalty weights
+        lambda_g, lambda_r: feasibility penalty weights
+        lambda_aux: conflict count auxiliary loss weight
 
     Returns: (total_cost, gate_info, reconfig_info)
     """
-    gc, g_info = gate_cost_surrogate(gate_atoms, curr_dists, H, W, lambda_g)
+    gc, g_info = gate_cost_surrogate(gate_atoms, curr_dists, H, W,
+                                      lambda_g, lambda_aux)
     rc, r_info = reconfig_cost_surrogate(prev_dists, curr_dists, H, W,
-                                          mover_indices, lambda_r)
+                                          mover_indices, lambda_r, lambda_aux)
     return gc + rc, g_info, r_info
 
 
 def total_cost_surrogate(initial_dists, layer_dists_list, tasks, H, W,
-                          mover_indices_list=None, lambda_g=1.0, lambda_r=1.0):
+                          mover_indices_list=None,
+                          lambda_g=1.0, lambda_r=1.0, lambda_aux=0.0):
     """Total surrogate cost across all layers.
 
     Args:
@@ -362,7 +372,8 @@ def total_cost_surrogate(initial_dists, layer_dists_list, tasks, H, W,
         tasks: list of gate lists per layer
         H, W: grid dims
         mover_indices_list: per-layer mover indices (default: all atoms)
-        lambda_g, lambda_r: penalty weights
+        lambda_g, lambda_r: feasibility penalty weights
+        lambda_aux: conflict count auxiliary loss weight
 
     Returns: (total_cost, list of (gate_info, reconfig_info) per layer)
     """
@@ -373,7 +384,7 @@ def total_cost_surrogate(initial_dists, layer_dists_list, tasks, H, W,
     for t, (dists_t, gates_t) in enumerate(zip(layer_dists_list, tasks)):
         movers = mover_indices_list[t] if mover_indices_list else None
         lc, g_info, r_info = layer_cost_surrogate(
-            prev, dists_t, gates_t, H, W, movers, lambda_g, lambda_r)
+            prev, dists_t, gates_t, H, W, movers, lambda_g, lambda_r, lambda_aux)
         total = total + lc
         layer_infos.append((g_info, r_info))
         prev = dists_t
