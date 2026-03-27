@@ -1,19 +1,17 @@
 """
-Ablation study: does the conflict-count auxiliary loss help?
+Ablation: loss landscape study — log vs linear vs huber.
 
-Compares configurations across multiple random seeds on Map 2:
-  A: feasibility only (λ_aux = 0)
-  B-D: feasibility + auxiliary (λ_aux = 0.5, 1.0, 2.0)
-  E-F: auxiliary only (λ_g = 0, λ_r = 0, λ_aux = 1.0, 2.0)
+Tests the hypothesis that:
+- log (-log F) is precise near optimum but creates rigid trajectories
+- linear (conflict_count) is smooth but only first-order accurate
+- huber combines both: log precision near optimum, linear stability far away
 
-Measures: true cost, convergence speed, seed sensitivity.
-Also measures overestimation bias: does the surrogate declare
-feasibility when the true configuration is infeasible?
+Also tests rebalanced combinations (λ_g << λ_aux) and varying δ.
 """
 
 import torch
 import torch.nn.functional as F
-import sys, os, time, copy
+import sys, os, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import get_config, set_derived_config, get_map_data, atom_map_to_positions
@@ -25,7 +23,7 @@ from surrogate import (
 torch.set_default_dtype(torch.float64)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Setup from config
+# Setup
 # ─────────────────────────────────────────────────────────────────────────────
 
 base_config = get_config()
@@ -46,8 +44,8 @@ relevant = [get_relevant_atoms(t) for t in tasks]
 donothing = sum(true_gate_cost(init_cells, t, H, W) for t in tasks)
 
 
-def run_optimization(seed, lambda_g, lambda_r, lambda_aux, n_steps, lr):
-    """Run single-instance optimization and return results."""
+def run_optimization(seed, lambda_g, lambda_r, lambda_aux, loss_mode, delta,
+                     n_steps=400, lr=0.03):
     torch.manual_seed(seed)
 
     layer_logits = []
@@ -81,13 +79,15 @@ def run_optimization(seed, lambda_g, lambda_r, lambda_aux, n_steps, lr):
 
         total_loss = torch.tensor(0.0)
         for t in range(len(tasks)):
-            gc, g_info = gate_cost_surrogate(
+            gc, _ = gate_cost_surrogate(
                 tasks[t], layer_dists[t], H, W,
-                lambda_g=lambda_g, lambda_aux=lambda_aux)
+                lambda_g=lambda_g, lambda_aux=lambda_aux,
+                loss_mode=loss_mode, delta=delta)
             src_d = init_dists if t == 0 else layer_dists[t-1]
-            rc, r_info = reconfig_cost_surrogate(
+            rc, _ = reconfig_cost_surrogate(
                 src_d, layer_dists[t], H, W,
-                mover_indices=relevant[t], lambda_r=lambda_r, lambda_aux=lambda_aux)
+                mover_indices=relevant[t], lambda_r=lambda_r, lambda_aux=lambda_aux,
+                loss_mode=loss_mode, delta=delta)
             total_loss = total_loss + gc + rc
 
         total_loss.backward()
@@ -99,30 +99,40 @@ def run_optimization(seed, lambda_g, lambda_r, lambda_aux, n_steps, lr):
                 true_tc, breakdown = true_total_cost(
                     init_cells, hard_cells_list, tasks, H, W)
                 history.append({
-                    'step': step,
-                    'surrogate': total_loss.item(),
-                    'true_cost': true_tc,
-                    'breakdown': breakdown,
+                    'step': step, 'surrogate': total_loss.item(),
+                    'true_cost': true_tc, 'breakdown': breakdown,
                 })
 
     return history
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ablation configurations
+# Experiment configs
 # ─────────────────────────────────────────────────────────────────────────────
 
 configs = {
-    'A: feas only':         {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.0},
-    'B: feas + aux(0.5)':   {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.5},
-    'C: feas + aux(1.0)':   {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 1.0},
-    'D: feas + aux(2.0)':   {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 2.0},
-    'E: aux only(1.0)':     {'lambda_g': 0.0, 'lambda_r': 0.0, 'lambda_aux': 1.0},
-    'F: aux only(2.0)':     {'lambda_g': 0.0, 'lambda_r': 0.0, 'lambda_aux': 2.0},
+    # Baselines from previous ablation
+    'log (λ_g=1)':           {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.0, 'loss_mode': 'log',    'delta': 0.1},
+    'linear (λ_aux=2)':      {'lambda_g': 0.0, 'lambda_r': 0.0, 'lambda_aux': 2.0, 'loss_mode': 'log',    'delta': 0.1},
+
+    # Huber at different δ
+    'huber δ=0.05':           {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.0, 'loss_mode': 'huber',  'delta': 0.05},
+    'huber δ=0.1':            {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.0, 'loss_mode': 'huber',  'delta': 0.1},
+    'huber δ=0.3':            {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 0.0, 'loss_mode': 'huber',  'delta': 0.3},
+
+    # Rebalanced: strong aux + weak log (addresses the λ magnitude imbalance)
+    'log(0.1)+aux(2)':        {'lambda_g': 0.1, 'lambda_r': 0.1, 'lambda_aux': 2.0, 'loss_mode': 'log',    'delta': 0.1},
+
+    # Huber + aux
+    'huber(0.1)+aux(1)':      {'lambda_g': 1.0, 'lambda_r': 1.0, 'lambda_aux': 1.0, 'loss_mode': 'huber',  'delta': 0.1},
+
+    # Stronger aux
+    'linear (λ_aux=3)':      {'lambda_g': 0.0, 'lambda_r': 0.0, 'lambda_aux': 3.0, 'loss_mode': 'log',    'delta': 0.1},
+    'linear (λ_aux=4)':      {'lambda_g': 0.0, 'lambda_r': 0.0, 'lambda_aux': 4.0, 'loss_mode': 'log',    'delta': 0.1},
 }
 
-N_SEEDS = base_config.optimizer.n_restarts
-N_STEPS = base_config.optimizer.n_steps
+N_SEEDS = 10
+N_STEPS = 400
 LR = base_config.optimizer.lr
 
 print(f"Map {base_config.map_num}: {H}×{W}, {N} atoms, {len(tasks)} layers")
@@ -131,24 +141,25 @@ print(f"Seeds: {N_SEEDS}, Steps: {N_STEPS}")
 print()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run ablation
+# Run
 # ─────────────────────────────────────────────────────────────────────────────
 
 results = {}
 
 for config_name, params in configs.items():
-    print(f"{'═' * 65}")
-    print(f"  {config_name}: λ_g={params['lambda_g']}, λ_r={params['lambda_r']}, "
-          f"λ_aux={params['lambda_aux']}")
-    print(f"{'═' * 65}")
+    print(f"{'═' * 70}")
+    mode = params['loss_mode']
+    delta = params['delta']
+    print(f"  {config_name}: mode={mode} δ={delta} λ_g={params['lambda_g']} "
+          f"λ_r={params['lambda_r']} λ_aux={params['lambda_aux']}")
+    print(f"{'═' * 70}")
 
     seed_results = []
     t_start = time.time()
 
     for seed_idx in range(N_SEEDS):
         seed = seed_idx * 100 + base_config.experiment.seed
-        history = run_optimization(
-            seed=seed, n_steps=N_STEPS, lr=LR, **params)
+        history = run_optimization(seed=seed, n_steps=N_STEPS, lr=LR, **params)
 
         final = history[-1]
         mid = history[len(history)//2] if len(history) > 1 else history[0]
@@ -156,7 +167,6 @@ for config_name, params in configs.items():
         seed_results.append({
             'seed': seed,
             'final_true': final['true_cost'],
-            'final_surr': final['surrogate'],
             'mid_true': mid['true_cost'],
             'breakdown': final['breakdown'],
         })
@@ -169,69 +179,33 @@ for config_name, params in configs.items():
     best = min(final_costs)
     worst = max(final_costs)
     mean = sum(final_costs) / len(final_costs)
-    n_optimal = sum(1 for c in final_costs if c <= 12)
+    n_good = sum(1 for c in final_costs if c <= 12)
 
-    print(f"  Final costs: {final_costs}")
-    print(f"  Best: {best}  Worst: {worst}  Mean: {mean:.1f}")
-    print(f"  ≤12: {n_optimal}/{N_SEEDS}")
-    print(f"  Mid-training costs: {mid_costs}")
+    print(f"  Final: {final_costs}")
+    print(f"  Best: {best}  Worst: {worst}  Mean: {mean:.1f}  ≤12: {n_good}/{N_SEEDS}")
+    print(f"  Mid: {mid_costs}")
     print(f"  Time: {t_elapsed:.1f}s ({t_elapsed/N_SEEDS:.1f}s/seed)")
 
     best_idx = final_costs.index(best)
     bd = seed_results[best_idx]['breakdown']
-    print(f"  Best breakdown: {['r'+str(r)+'+g'+str(g) for r,g in bd]}")
+    print(f"  Best: {['r'+str(r)+'+g'+str(g) for r,g in bd]}")
     print()
 
     results[config_name] = {
-        'final_costs': final_costs,
-        'best': best,
-        'worst': worst,
-        'mean': mean,
-        'n_optimal': n_optimal,
+        'final_costs': final_costs, 'best': best, 'worst': worst,
+        'mean': mean, 'n_good': n_good,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Summary comparison
+# Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
-print(f"\n{'═' * 65}")
-print("  ABLATION SUMMARY")
-print(f"{'═' * 65}")
+print(f"\n{'═' * 70}")
+print("  LOSS MODE ABLATION SUMMARY")
+print(f"{'═' * 70}")
 print(f"  {'Config':<25s} {'Best':>5s} {'Worst':>6s} {'Mean':>6s} {'≤12':>4s}")
 print(f"  {'-'*25} {'-'*5} {'-'*6} {'-'*6} {'-'*4}")
 for name, res in results.items():
     print(f"  {name:<25s} {res['best']:>5d} {res['worst']:>6d} "
-          f"{res['mean']:>6.1f} {res['n_optimal']:>3d}/{N_SEEDS}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Overestimation bias check
-# ─────────────────────────────────────────────────────────────────────────────
-
-print(f"\n{'═' * 65}")
-print("  OVERESTIMATION BIAS CHECK")
-print(f"{'═' * 65}")
-print("  Does the surrogate ever declare F≈1 when true χ > 1?")
-
-torch.manual_seed(42)
-n_bias_tests = 500
-false_feasible = 0
-
-for trial in range(n_bias_tests):
-    logits = torch.randn(N, C) * 1.0
-    for q in range(N):
-        logits[q, init_cells[q]] += 2.0
-    dists = F.softmax(logits, dim=-1)
-
-    for t, gates in enumerate(tasks):
-        F_gate, info = gate_feasibility(gates, dists, H, W)
-        hard = dists.argmax(dim=-1)
-        true_gc = true_gate_cost(hard, gates, H, W, canon=True)
-
-        if F_gate.item() > 0.5 and true_gc > 2:
-            false_feasible += 1
-
-total_checks = n_bias_tests * len(tasks)
-print(f"  Checked {total_checks} random (dist, layer) pairs")
-print(f"  False feasible (F>0.5 but χ>1): {false_feasible} ({false_feasible/total_checks:.1%})")
+          f"{res['mean']:>6.1f} {res['n_good']:>3d}/{N_SEEDS}")
