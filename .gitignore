@@ -42,3 +42,8 @@ checkpoints/
 .claude/
 
 deprecated/
+
+*.log
+*.txt
+
+**/wandb
