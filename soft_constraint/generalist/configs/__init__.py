@@ -11,10 +11,10 @@ def get_config(config_string=None):
     config_string formats:
         "model_type/variant"              -> default experiment (neutral_atoms)
         "experiment/model_type/variant"   -> explicit experiment
-        "model_type"                      -> default experiment, variant='iter_T4N4'
+        "model_type"                      -> default experiment, variant='iter_T1N4'
 
     CLI usage:
-        python main2.py --cfg=config2.py:trm_dit/iter_T4N4
+        python main2.py --cfg=config2.py:trm_dit/iter_T1N4
         python main2.py --cfg=config2.py:trm_dit/tiny_T2N2 --cfg.optim.lr=1e-4
     """
     experiment, model_type, variant = _parse_config_string(config_string)
@@ -44,7 +44,7 @@ def get_config(config_string=None):
 
 def _parse_config_string(config_string):
     if not config_string:
-        return DEFAULT_EXPERIMENT, 'trm_dit', 'iter_T4N4'
+        return DEFAULT_EXPERIMENT, 'trm_dit', 'iter_T1N4'
 
     parts = config_string.split('/')
 
@@ -52,7 +52,7 @@ def _parse_config_string(config_string):
         return parts[0], parts[1], parts[2]
     elif len(parts) == 2:
         if parts[0] in EXPERIMENTS and parts[1] in MODEL_CONFIGS:
-            return parts[0], parts[1], 'iter_T4N4'
+            return parts[0], parts[1], 'iter_T1N4'
         elif parts[0] in MODEL_CONFIGS:
             return DEFAULT_EXPERIMENT, parts[0], parts[1]
         else:
@@ -62,7 +62,7 @@ def _parse_config_string(config_string):
             )
     elif len(parts) == 1:
         if parts[0] in MODEL_CONFIGS:
-            return DEFAULT_EXPERIMENT, parts[0], 'iter_T4N4'
+            return DEFAULT_EXPERIMENT, parts[0], 'iter_T1N4'
         raise ValueError(f"Unknown model_type: {parts[0]}")
     else:
         raise ValueError(f"Config string has too many parts: '{config_string}'")

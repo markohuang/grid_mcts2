@@ -18,7 +18,7 @@ def setup_experiment(cfg):
         vloader = DataLoader(SingleMapDataset(SINGLE_MAP),
                              batch_size=cfg.data.batch_size,
                              collate_fn=neutral_atoms_collate_fn,
-                             num_workers=0, pin_memory=True)
+                             num_workers=cfg.data.num_workers, pin_memory=True)
         return tloader, vloader
 
     tloader = DataLoader(

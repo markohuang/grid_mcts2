@@ -10,17 +10,16 @@ def get_base_config():
 
     # Optimizer
     cfg.optim = ConfigDict()
-    cfg.optim.type = 'muon'
-    cfg.optim.lr = 3e-4
+    cfg.optim.type = 'adamw'
+    cfg.optim.lr = 1e-3
     cfg.optim.beta1 = 0.9
     cfg.optim.beta2 = 0.999
     cfg.optim.eps = 1e-8
     cfg.optim.weight_decay = 0.01
-    cfg.optim.warmup_steps = 1000
+    cfg.optim.warmup_steps = 50
     cfg.optim.muon_momentum = 0.95
 
     # Trainer
-    use_muon = cfg.optim.type == 'muon'
     cfg.trainer = ConfigDict()
     cfg.trainer.max_steps = 50000
     cfg.trainer.check_val_every_n_epoch = None
@@ -28,7 +27,7 @@ def get_base_config():
     cfg.trainer.limit_val_batches = 50
     cfg.trainer.log_every_n_steps = 10
     cfg.trainer.precision = 'bf16-mixed'
-    cfg.trainer.gradient_clip_val = 0 if use_muon else 1.0
+    cfg.trainer.gradient_clip_val = 1.0
     cfg.trainer.accelerator = 'auto'
     cfg.trainer.devices = 1
 

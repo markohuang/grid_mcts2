@@ -25,6 +25,7 @@ def apply_single_map_config(cfg):
 
     cfg.training = ConfigDict()
     cfg.training.select_prob = 0.3
+    cfg.training.regurgitate_steps = 3
 
     cfg.surrogate = ConfigDict()
     cfg.surrogate.lambda_g = 1.0
@@ -39,8 +40,8 @@ def apply_single_map_config(cfg):
     cfg.data.num_workers = 0
 
     cfg.data.augmentation = ConfigDict()
-    cfg.data.augmentation.enabled = True
-    cfg.data.augmentation.transforms = ('atom_permutation', 'rotation', 'reflection', 'transpose')
+    cfg.data.augmentation.enabled = False
+    cfg.data.augmentation.transforms = ()
 
     return cfg
 
