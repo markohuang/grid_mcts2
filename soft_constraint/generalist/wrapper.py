@@ -14,35 +14,30 @@ from surrogate.batched import batched_total_cost_surrogate
 from surrogate.primitives import true_total_cost
 
 
-def neutral_atoms_constraint_loss(probs, init_cells, tasks, task_partner, H, W, N,
+def neutral_atoms_constraint_loss(plan_dists, init_cells, tasks, task_partner, H, W, N,
                                    lambda_g, lambda_r, lambda_aux, loss_mode, delta):
     """Cost surrogate loss with relevant-atom pinning.
 
-    Non-relevant atoms (no gate in a layer) are pinned to their previous-layer
-    position. Only relevant atoms' model predictions contribute to the loss.
-
-    Uses batched surrogate when all samples share the same task structure (common
-    in single_map and augmented-same-map training).
+    Args:
+        plan_dists: (B, T*N, C) full plan distributions (draft with updates merged)
     """
-    B, TN, C = probs.shape
+    B, TN, C = plan_dists.shape
     T = len(tasks[0])
-    plan = probs.view(B, T, N, C)
-    relevant_mask = (task_partner.view(B, T, N) != N)  # (B, T, N) True if atom has gate
+    plan = plan_dists.view(B, T, N, C)
+    relevant_mask = (task_partner.view(B, T, N) != N)
 
-    # Build init_dists: (B, N, C)
-    init_dists = F.one_hot(init_cells, C).float().to(probs.dtype)
+    init_dists = F.one_hot(init_cells, C).float().to(plan_dists.dtype)
 
-    # Build mixed layer dists with pinning: list of T × (B, N, C)
+    # Pin non-relevant atoms to previous layer
     mixed_layers = []
     prev = init_dists
     for t in range(T):
-        pred = plan[:, t]                                  # (B, N, C)
-        rel = relevant_mask[:, t].unsqueeze(-1)            # (B, N, 1)
-        mixed = torch.where(rel, pred, prev.detach())      # pin non-relevant
+        pred = plan[:, t]
+        rel = relevant_mask[:, t].unsqueeze(-1)
+        mixed = torch.where(rel, pred, prev.detach())
         mixed_layers.append(mixed)
         prev = mixed
 
-    # Check if all samples share the same task structure (enables batched path)
     shared_tasks = _all_tasks_equal(tasks)
     if shared_tasks:
         costs = batched_total_cost_surrogate(
@@ -50,8 +45,7 @@ def neutral_atoms_constraint_loss(probs, init_cells, tasks, task_partner, H, W, 
             lambda_g=lambda_g, lambda_r=lambda_r, loss_mode=loss_mode, delta=delta)
         return costs.mean()
 
-    # Fallback: per-sample loop for heterogeneous tasks
-    total_loss = torch.tensor(0.0, device=probs.device, dtype=probs.dtype)
+    total_loss = torch.tensor(0.0, device=plan_dists.device, dtype=plan_dists.dtype)
     for b in range(B):
         layers_b = [mixed_layers[t][b] for t in range(T)]
         cost, _ = total_cost_surrogate(
@@ -63,14 +57,18 @@ def neutral_atoms_constraint_loss(probs, init_cells, tasks, task_partner, H, W, 
 
 
 def _all_tasks_equal(tasks):
-    """Check if all B samples have identical task structure."""
     ref = tasks[0]
     return all(t == ref for t in tasks[1:])
 
 
-def _na_soft_init(B, ans_len, C, device):
-    """Uniform 1/C initialization for all answer tokens."""
-    return torch.full((B, ans_len, C), 1.0 / C, device=device)
+def _draft_init_biased(init_cells, N, T_layers, C, device, bias=4.0):
+    """Initialize draft biased toward initial positions."""
+    B = init_cells.shape[0]
+    logits = torch.zeros(B, T_layers * N, C, device=device)
+    # Repeat init_cells across all layers
+    init_expanded = init_cells.unsqueeze(1).expand(B, T_layers, N).reshape(B, T_layers * N)
+    logits.scatter_(2, init_expanded.unsqueeze(-1), bias)
+    return logits.softmax(-1)
 
 
 class NeutralAtomsWrapper(LightningModule):
@@ -96,46 +94,55 @@ class NeutralAtomsWrapper(LightningModule):
         """(B, T*N) bool — True for atoms involved in a gate for that layer."""
         return (task_partner.view(B, -1) != self.N)
 
-    def _compute_loss(self, probs, init_cells, tasks_list, task_partner):
+    def _compute_loss(self, plan_dists, init_cells, tasks_list, task_partner):
         return neutral_atoms_constraint_loss(
-            probs, init_cells, tasks_list, task_partner,
+            plan_dists, init_cells, tasks_list, task_partner,
             self.H, self.W, self.N,
             self.cfg.surrogate.lambda_g, self.cfg.surrogate.lambda_r,
             self.cfg.surrogate.lambda_aux, self.cfg.surrogate.loss_mode,
             self.cfg.surrogate.delta)
 
     # ------------------------------------------------------------------
-    # Training
+    # Training — iterative partial refinement
     # ------------------------------------------------------------------
 
     def training_step(self, batch, batch_idx):
         init_cells, task_partner, tasks_list = batch
         B = init_cells.shape[0]
-        tp_flat = task_partner.view(B, -1)  # (B, T*N)
-        S = self._relevant_mask(task_partner, B)  # (B, T*N) — moveable atoms
+        tp_flat = task_partner.view(B, -1)
+        relevant = self._relevant_mask(task_partner, B)  # (B, T*N)
+        select_prob = self.cfg.training.select_prob
 
-        R = self.cfg.training.regurgitate_steps
         T_outer = self.cfg.model.T
-        total_steps = R * T_outer
-
-        x_ans_soft = _na_soft_init(B, self.ans_len, self.C, init_cells.device)
         total_loss = 0.0
 
-        for r in range(R):
-            z_H, z_L = None, None
-            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                for step in range(T_outer):
-                    logits, z_H, z_L = self.model(
-                        init_cells, x_ans_soft, tp_flat, z_H, z_L, selected=S)
+        # Start from biased draft (near initial positions)
+        x_draft = _draft_init_biased(init_cells, self.N, self.T_layers, self.C,
+                                     init_cells.device)
+        z_H, z_L = None, None
 
-                    probs = logits.float().softmax(-1)
-                    total_loss = total_loss + self._compute_loss(
-                        probs, init_cells, tasks_list, task_partner)
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            for step in range(T_outer):
+                # Random subset of positions to update this step
+                S = (torch.rand(B, self.ans_len, device=init_cells.device) < select_prob) & relevant
 
-            # Regurgitate: feed output back as input for next round (detached)
-            x_ans_soft = probs.detach()
+                logits, z_H, z_L = self.model(
+                    init_cells, x_draft, tp_flat, z_H, z_L, selected=S)
 
-        loss = total_loss / total_steps
+                probs = logits.float().softmax(-1)
+
+                # Partial update: only selected positions get model's prediction,
+                # rest keep draft values
+                updated_draft = torch.where(
+                    S.unsqueeze(-1), probs, x_draft.detach().to(probs.dtype))
+
+                total_loss = total_loss + self._compute_loss(
+                    updated_draft, init_cells, tasks_list, task_partner)
+
+                # Evolve draft for next step (detach to prevent BPTT across steps)
+                x_draft = updated_draft.detach()
+
+        loss = total_loss / T_outer
         self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=False, batch_size=B)
 
         if self._use_muon:
@@ -160,18 +167,31 @@ class NeutralAtomsWrapper(LightningModule):
         init_cells, task_partner, tasks_list = batch
         B = init_cells.shape[0]
         tp_flat = task_partner.view(B, -1)
-        x_ans_soft = _na_soft_init(B, self.ans_len, self.C, init_cells.device)
-        S = self._relevant_mask(task_partner, B)
+        relevant = self._relevant_mask(task_partner, B)
 
+        # Inference with multiple refinement steps
+        x_draft = _draft_init_biased(init_cells, self.N, self.T_layers, self.C,
+                                     init_cells.device)
+
+        T_outer = self.cfg.model.T
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            logits, _, _ = self.model(init_cells, x_ans_soft, tp_flat, selected=S)
-            probs = logits.float().softmax(-1)
-            val_loss = self._compute_loss(probs, init_cells, tasks_list, task_partner)
+            z_H, z_L = None, None
+            for step in range(T_outer):
+                # Select all relevant atoms for val (no randomness)
+                S = relevant
+                logits, z_H, z_L = self.model(
+                    init_cells, x_draft, tp_flat, z_H, z_L, selected=S)
+                probs = logits.float().softmax(-1)
+                x_draft = torch.where(
+                    S.unsqueeze(-1), probs, x_draft.to(probs.dtype)).detach()
+
+            val_loss = self._compute_loss(x_draft, init_cells, tasks_list, task_partner)
+
         self.log('val_loss', val_loss, prog_bar=True, on_step=False, on_epoch=True,
                  sync_dist=True, batch_size=B)
 
-        # Compute true cost on hard assignments
-        hard_plan = logits.argmax(-1).view(B, self.T_layers, self.N)
+        # True cost on hard assignments
+        hard_plan = x_draft.argmax(-1).view(B, self.T_layers, self.N)
         total_true_cost = 0.0
         for b in range(B):
             tc, _ = true_total_cost(
@@ -182,16 +202,25 @@ class NeutralAtomsWrapper(LightningModule):
         self.log('val_true_cost', total_true_cost / B, prog_bar=True, on_step=False,
                  on_epoch=True, sync_dist=True, batch_size=B)
 
-    def infer(self, init_cells, task_partner, n_steps=1):
+    def infer(self, init_cells, task_partner, n_steps=None):
         B = init_cells.shape[0]
         tp_flat = task_partner.view(B, -1)
-        x_ans_soft = _na_soft_init(B, self.ans_len, self.C, init_cells.device)
-        S = self._relevant_mask(task_partner, B)
-        for _ in range(n_steps):
+        relevant = self._relevant_mask(task_partner, B)
+        if n_steps is None:
+            n_steps = self.cfg.model.T
+
+        x_draft = _draft_init_biased(init_cells, self.N, self.T_layers, self.C,
+                                     init_cells.device)
+        z_H, z_L = None, None
+        for step in range(n_steps):
+            S = relevant
             with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                logits, _, _ = self.model(init_cells, x_ans_soft, tp_flat, selected=S)
-            x_ans_soft = logits.float().softmax(-1).detach()
-        return logits.argmax(-1).view(B, self.T_layers, self.N)
+                logits, z_H, z_L = self.model(
+                    init_cells, x_draft, tp_flat, z_H, z_L, selected=S)
+            probs = logits.float().softmax(-1)
+            x_draft = torch.where(
+                S.unsqueeze(-1), probs, x_draft.to(probs.dtype)).detach()
+        return x_draft.argmax(-1).view(B, self.T_layers, self.N)
 
     # ------------------------------------------------------------------
     # Optimizer

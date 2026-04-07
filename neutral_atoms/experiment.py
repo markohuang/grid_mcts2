@@ -3,11 +3,58 @@ import math
 import os
 import hashlib
 import time
+import sys
+import subprocess
 import torch
 
 from .env import NeutralAtomsEnv
 from .tasks import gates_to_moves, get_relevant_atoms
 from .moves import count_groups
+
+
+def _split_tags(raw_tags):
+    return [tag.strip() for tag in raw_tags.split(',') if tag.strip()]
+
+
+def _git_metadata():
+    try:
+        commit = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return {'git_commit': '', 'git_dirty': None}
+    try:
+        dirty = bool(subprocess.check_output(
+            ['git', 'status', '--porcelain'], text=True, stderr=subprocess.DEVNULL
+        ).strip())
+    except Exception:
+        dirty = None
+    return {'git_commit': commit, 'git_dirty': dirty}
+
+
+def build_run_manifest(run_id, config):
+    manifest = {
+        'run_id': run_id,
+        'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'argv': sys.argv,
+        'cwd': os.getcwd(),
+        'study': config.experiment.study,
+        'hypothesis': config.experiment.hypothesis,
+        'variant': config.experiment.variant,
+        'tags': _split_tags(config.experiment.tags),
+        'notes': config.experiment.notes,
+        'decision': config.experiment.decision,
+        'parent_run': config.experiment.parent_run,
+        'map_num': config.map_num,
+        'reward_mode': config.env.reward_mode,
+        'random_board': config.random_board,
+        'use_fake': config.use_fake,
+        'num_simulations': config.mcts.num_simulations,
+        'plan_cost_search_bonus_weight': config.mcts.plan_cost_search_bonus_weight,
+        'seed': config.training.seed,
+    }
+    manifest.update(_git_metadata())
+    return manifest
 
 
 def create_run_dir(config):
@@ -18,6 +65,9 @@ def create_run_dir(config):
     config_path = os.path.join(run_dir, 'config.json')
     with open(config_path, 'w') as f:
         json.dump(config.to_dict(), f, indent=2)
+    manifest_path = os.path.join(run_dir, 'manifest.json')
+    with open(manifest_path, 'w') as f:
+        json.dump(build_run_manifest(run_id, config), f, indent=2)
     return run_id, run_dir
 
 
@@ -160,16 +210,67 @@ def selfplay_metrics(games):
     # MCTS diagnostics
     all_depths = [d for g in games for d in g.mcts_depths]
     all_reward_fracs = [f for g in games for f in g.mcts_reward_fracs]
+    all_reward_sum_means = [x for g in games for x in g.mcts_reward_sum_means]
+    all_reward_sum_stds = [x for g in games for x in g.mcts_reward_sum_stds]
+    all_reward_abs_sum_means = [x for g in games for x in g.mcts_reward_abs_sum_means]
+    all_boundary_fracs = [x for g in games for x in g.mcts_boundary_reach_fracs]
+    all_sign_changes = [x for g in games for x in g.mcts_sign_changes_means]
     if all_depths:
         metrics['avg_mcts_depth'] = round(sum(all_depths) / len(all_depths), 1)
     if all_reward_fracs:
         metrics['mcts_reward_frac'] = round(sum(all_reward_fracs) / len(all_reward_fracs), 2)
+    if all_reward_sum_means:
+        metrics['mcts_reward_sum_mean'] = round(sum(all_reward_sum_means) / len(all_reward_sum_means), 3)
+    if all_reward_sum_stds:
+        metrics['mcts_reward_sum_std'] = round(sum(all_reward_sum_stds) / len(all_reward_sum_stds), 3)
+    if all_reward_abs_sum_means:
+        metrics['mcts_reward_abs_sum_mean'] = round(sum(all_reward_abs_sum_means) / len(all_reward_abs_sum_means), 3)
+    if all_boundary_fracs:
+        metrics['mcts_boundary_reach_frac'] = round(sum(all_boundary_fracs) / len(all_boundary_fracs), 2)
+    if all_sign_changes:
+        metrics['mcts_sign_changes_mean'] = round(sum(all_sign_changes) / len(all_sign_changes), 2)
     # Reward stats
     all_rewards = [r for g in games for r in g.rewards]
     if all_rewards:
         metrics['avg_reward'] = round(sum(all_rewards) / len(all_rewards), 3)
         nonzero = [r for r in all_rewards if abs(r) > 1e-6]
         metrics['reward_nonzero_frac'] = round(len(nonzero) / len(all_rewards), 2)
+    # Cost histogram: fraction of games at each cost bucket
+    cost_counts = {}
+    for c in costs:
+        cost_counts[c] = cost_counts.get(c, 0) + 1
+    metrics['cost_hist'] = {str(k): round(v / len(costs), 3) for k, v in sorted(cost_counts.items())}
+    # Value calibration: correlation between per-game mean root_value (normalized by map's
+    # do_nothing baseline) and actual cost. Normalization is essential for multi-map training:
+    # raw root_value = do_nothing(map) - actual_cost under Option E, so maps with higher
+    # do_nothing baselines inflate root_value independently of policy quality.
+    # Normalized: adj_root_value = do_nothing - root_value ≈ expected_actual_cost, so
+    # correlation with actual_cost should be positive when V is accurate.
+    game_root_vals = [sum(g.root_values) / len(g.root_values) if g.root_values else None for g in games]
+    do_nothings = [g.environment.cost_ub for g in games]
+    pairs = [(dn - rv, c) for rv, dn, c in zip(game_root_vals, do_nothings, costs) if rv is not None]
+    if len(pairs) >= 2:
+        adj_rvs = [p[0] for p in pairs]
+        cs = [p[1] for p in pairs]
+        mean_rv, mean_c = sum(adj_rvs) / len(adj_rvs), sum(cs) / len(cs)
+        cov = sum((r - mean_rv) * (c - mean_c) for r, c in pairs) / len(pairs)
+        std_rv = (sum((r - mean_rv)**2 for r in adj_rvs) / len(adj_rvs)) ** 0.5
+        std_c = (sum((c - mean_c)**2 for c in cs) / len(cs)) ** 0.5
+        metrics['val_cost_corr'] = round(cov / (std_rv * std_c + 1e-8), 3)
+    # Per-layer entropy: split episode steps by layer boundaries
+    layer_entropies = {}
+    for g in games:
+        boundaries = [0]
+        for atoms in g.environment.layer_relevant_atoms:
+            boundaries.append(boundaries[-1] + len(atoms))
+        for layer_idx, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+            key = f'entropy_layer{layer_idx}'
+            for step in range(start, min(end, len(g.child_visits))):
+                probs = [p for p in g.child_visits[step] if p > 0]
+                if probs:
+                    layer_entropies.setdefault(key, []).append(-sum(p * math.log(p) for p in probs))
+    for key, vals in layer_entropies.items():
+        metrics[key] = round(sum(vals) / len(vals), 3)
     return metrics
 
 
@@ -183,17 +284,40 @@ def append_to_registry(output_dir, run_id, config, metrics):
     entry = {
         'run_id': run_id,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'study': config.experiment.study,
+        'hypothesis': config.experiment.hypothesis,
+        'variant': config.experiment.variant,
+        'tags': _split_tags(config.experiment.tags),
+        'notes': config.experiment.notes,
+        'decision': config.experiment.decision,
+        'parent_run': config.experiment.parent_run,
         'map_num': config.map_num,
         'use_fake': config.use_fake,
+        'random_board': config.random_board,
+        'reward_mode': config.env.reward_mode,
         'num_simulations': config.mcts.num_simulations,
+        'plan_cost_search_bonus_weight': config.mcts.plan_cost_search_bonus_weight,
+        'root_dirichlet_alpha': config.mcts.root_dirichlet_alpha,
+        'root_exploration_fraction': config.mcts.root_exploration_fraction,
+        'temperature_init': config.mcts.temperature_init,
+        'temperature_final': config.mcts.temperature_final,
+        'temperature_decay_steps': config.mcts.temperature_decay_steps,
         'lr': config.training.lr,
         'batch_size': config.training.batch_size,
         'training_steps': config.training.training_steps,
         'num_selfplay': config.training.num_selfplay,
         'num_parallel_games': config.training.num_parallel_games,
+        'seed': config.training.seed,
+        'data_augmentation': config.training.data_augmentation,
+        'fixed_map_fraction': config.training.fixed_map_fraction,
+        'curriculum_maps': config.experiment.curriculum_maps,
+        'curriculum_patience': config.experiment.curriculum_patience,
+        'curriculum_initial_phase': config.experiment.curriculum_initial_phase,
+        'load_checkpoint': config.experiment.load_checkpoint,
         'correctness_weight': config.network.correctness_weight,
         'latency_weight': config.network.latency_weight,
     }
+    entry.update(_git_metadata())
     entry.update({k: v for k, v in metrics.items() if k != 'best_game'})
     registry_path = os.path.join(output_dir, 'run_registry.jsonl')
     with open(registry_path, 'a') as f:

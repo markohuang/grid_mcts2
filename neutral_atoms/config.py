@@ -59,6 +59,7 @@ def get_config():
     c.env.reward_scale = 1.0
     c.env.reward_mode = 'plan_cost'  # 'plan_cost', 'layer_delta', 'layer_completion', 'remaining_cost'
     c.env.entropy_weight = 0.0  # tie-breaker: adds entropy_weight * within_group_entropy to cost (0 = off)
+    c.env.track_plan_delta = False  # expose plan_cost delta in step info for diagnostics / MCTS heuristics
 
     c.mcts = ml_collections.ConfigDict()
     c.mcts.num_simulations = 50
@@ -72,6 +73,7 @@ def get_config():
     c.mcts.temperature_init = 2.0
     c.mcts.temperature_final = 0.25
     c.mcts.temperature_decay_steps = 1000
+    c.mcts.plan_cost_search_bonus_weight = 0.0  # extra UCB bonus from normalized plan_cost delta
 
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50
@@ -99,6 +101,13 @@ def get_config():
     c.experiment.curriculum_maps = 0        # number of random maps to add progressively (0 = off)
     c.experiment.curriculum_patience = 20   # epochs without improvement before adding next map
     c.experiment.curriculum_initial_phase = 0  # pre-populate map pool for resuming mid-curriculum
+    c.experiment.study = ''                 # grouping key: e.g. round08_reward_signal
+    c.experiment.hypothesis = ''            # short id: e.g. H1
+    c.experiment.variant = ''               # control/treatment/run label
+    c.experiment.tags = ''                  # comma-separated labels for filtering
+    c.experiment.notes = ''                 # concise human note saved with the run
+    c.experiment.parent_run = ''            # prior run/checkpoint this run builds on
+    c.experiment.decision = ''              # optional intended decision if hypothesis is confirmed
     c.training.fixed_map_fraction = 0.0    # fraction of selfplay games using the fixed eval map (0 = off)
 
     c.network = ml_collections.ConfigDict()

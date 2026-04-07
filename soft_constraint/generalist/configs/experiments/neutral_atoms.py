@@ -16,7 +16,6 @@ def apply_neutral_atoms_config(cfg):
     # Training
     cfg.training = ConfigDict()
     cfg.training.select_prob = 0.3
-    cfg.training.regurgitate_steps = 3  # feed output back as input N times per batch
 
     # Surrogate loss weights
     cfg.surrogate = ConfigDict()

@@ -20,6 +20,7 @@ class NeutralAtomsEnv:
         self.reward_scale = config.reward_scale
         self.reward_mode = getattr(config, 'reward_mode', 'remaining_cost')
         self.entropy_weight = getattr(config, 'entropy_weight', 0.0)
+        self.track_plan_delta = getattr(config, 'track_plan_delta', False)
         self._precompute_relevant_atoms()
         self._precompute_gate_indicators()
         self.reset()
@@ -61,6 +62,8 @@ class NeutralAtomsEnv:
         if self.reward_mode == 'layer_delta':
             self._current_layer_cost = self._compute_layer_cost_fast()
             self._layer_initial_cost = self._current_layer_cost  # saved for boundary correction
+        if self.reward_mode == 'plan_cost_unbiased':
+            self._do_nothing_total = self._compute_remaining_cost()
         self._cached_cost = None
         self._init_board_feat()
         return self._get_observation()
@@ -99,11 +102,13 @@ class NeutralAtomsEnv:
         qubit_idx = self.current_qubit
         current_flat = (self.atom_positions[qubit_idx][0] * self.board_width +
                         self.atom_positions[qubit_idx][1]).item()
+        track_plan_delta = self.track_plan_delta or self.reward_mode in ('plan_cost', 'plan_cost_unbiased')
+        plan_cost_delta = 0.0
 
         # Capture cost BEFORE any changes for reward computation
-        if self.reward_mode == 'plan_cost':
+        if track_plan_delta:
             cost_before = self._compute_remaining_cost()
-        elif self.reward_mode == 'layer_delta':
+        if self.reward_mode == 'layer_delta':
             prev_layer_cost = self._current_layer_cost
 
         # Apply the action
@@ -126,9 +131,13 @@ class NeutralAtomsEnv:
 
         # Compute reward from the MOVE only (before auto-execute state changes)
         reward = 0.0
-        if self.reward_mode == 'plan_cost':
+        if track_plan_delta:
             cost_after_move = self._compute_remaining_cost()
+            plan_cost_delta = cost_before - cost_after_move
+        if self.reward_mode == 'plan_cost':
             reward = (cost_before - cost_after_move) * self.reward_scale
+        elif self.reward_mode == 'plan_cost_unbiased':
+            reward = (cost_before - cost_after_move - self._do_nothing_total / self.episode_length) * self.reward_scale
 
         # Auto-execute layer when all relevant atoms have been placed
         if self.current_atom_idx >= len(self.relevant_atoms):
@@ -164,7 +173,8 @@ class NeutralAtomsEnv:
                   'cost_lb': self.cost_lb, 'cost_ub': self.cost_ub,
                   'current_qubit': self.current_qubit,
                   'total_move_distance': self.total_move_distance,
-                  'num_moves': self.num_moves}
+                  'num_moves': self.num_moves,
+                  'plan_cost_delta': plan_cost_delta}
         )
 
     def _compute_layer_cost_fast(self, layer_idx=None) -> float:
@@ -261,9 +271,12 @@ class NeutralAtomsEnv:
         new_env.num_moves = self.num_moves
         new_env.reward_mode = self.reward_mode
         new_env.entropy_weight = self.entropy_weight
+        new_env.track_plan_delta = self.track_plan_delta
         if self.reward_mode == 'layer_delta':
             new_env._current_layer_cost = self._current_layer_cost
             new_env._layer_initial_cost = self._layer_initial_cost
+        if self.reward_mode == 'plan_cost_unbiased':
+            new_env._do_nothing_total = self._do_nothing_total
         new_env._cost_dirty = True
         new_env._cached_cost = None
         return new_env

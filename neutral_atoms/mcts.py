@@ -30,6 +30,7 @@ class Node:
         self.value_sum = 0
         self.children = {}
         self.reward = 0
+        self.search_bonus = 0.0
 
     def expanded(self):
         return bool(self.children)
@@ -57,7 +58,10 @@ class MinMaxStats:
 
 # ---- MCTS Algorithm ----
 
-def play_game(game: Game, config, network: Network) -> Game:
+def play_game(game: Game, config, network: Network,
+              add_exploration_noise: bool = True,
+              deterministic: bool = False,
+              temperature_override: float | None = None) -> Game:
     while not game.terminal() and len(game.history) < config.max_moves:
         min_max_stats = MinMaxStats(config.known_bounds)
         root = Node(0)
@@ -69,10 +73,14 @@ def play_game(game: Game, config, network: Network) -> Game:
             [root], network_output.value,
             config.discount, min_max_stats,
         )
-        _add_exploration_noise(config, root)
+        if add_exploration_noise:
+            _add_exploration_noise(config, root)
 
         run_mcts(config, root, game.history, network, min_max_stats, game.environment)
-        action = _select_action(network.training_steps(), root, config, game.action_space_size)
+        action = _select_action(
+            network.training_steps(), root, config, game.action_space_size,
+            deterministic=deterministic, temperature_override=temperature_override,
+        )
         game.cache_observation()
         game.apply(action)
         game.store_search_statistics(root)
@@ -83,21 +91,48 @@ def play_game(game: Game, config, network: Network) -> Game:
 def run_mcts(config, root, history, network, min_max_stats, env):
     total_depth = 0
     total_nonzero_reward_sims = 0
+    total_reward_sum = 0.0
+    total_reward_sq_sum = 0.0
+    total_abs_reward_sum = 0.0
+    total_boundary_sims = 0
+    total_sign_changes = 0
+    use_plan_bonus = getattr(config, 'plan_cost_search_bonus_weight', 0.0) > 0
     for _ in range(config.num_simulations):
         node = root
         search_path = [node]
         sim_env = env.clone()
         sim_reward_sum = 0.0
+        sim_abs_reward_sum = 0.0
+        sim_boundary_reached = False
+        sim_sign_changes = 0
+        prev_nonzero_sign = 0
 
         while node.expanded():
+            layer_before = sim_env.tasks_done
             action, node = _select_child(config, node, min_max_stats)
             result = sim_env.step(action, skip_obs=True)
+            if use_plan_bonus:
+                node.search_bonus = result.info.get('plan_cost_delta', 0.0) / max(sim_env.cost_ub, 1)
             search_path.append(node)
             sim_reward_sum += result.reward
+            sim_abs_reward_sum += abs(result.reward)
+            if result.info.get('tasks_done', 0) > layer_before:
+                sim_boundary_reached = True
+            reward_sign = 1 if result.reward > 1e-6 else -1 if result.reward < -1e-6 else 0
+            if reward_sign != 0:
+                if prev_nonzero_sign != 0 and reward_sign != prev_nonzero_sign:
+                    sim_sign_changes += 1
+                prev_nonzero_sign = reward_sign
 
         total_depth += len(search_path) - 1
         if abs(sim_reward_sum) > 1e-6:
             total_nonzero_reward_sims += 1
+        total_reward_sum += sim_reward_sum
+        total_reward_sq_sum += sim_reward_sum ** 2
+        total_abs_reward_sum += sim_abs_reward_sum
+        total_sign_changes += sim_sign_changes
+        if sim_boundary_reached:
+            total_boundary_sims += 1
 
         obs_features = {
             'features': sim_env.get_features(),
@@ -110,16 +145,28 @@ def run_mcts(config, root, history, network, min_max_stats, env):
             search_path, network_output.value,
             config.discount, min_max_stats,
         )
-    root._mcts_avg_depth = total_depth / config.num_simulations
-    root._mcts_reward_frac = total_nonzero_reward_sims / config.num_simulations
+    num_sims = config.num_simulations
+    reward_mean = total_reward_sum / num_sims
+    reward_var = max(total_reward_sq_sum / num_sims - reward_mean ** 2, 0.0)
+    root._mcts_avg_depth = total_depth / num_sims
+    root._mcts_reward_frac = total_nonzero_reward_sims / num_sims
+    root._mcts_reward_sum_mean = reward_mean
+    root._mcts_reward_sum_std = math.sqrt(reward_var)
+    root._mcts_reward_abs_sum_mean = total_abs_reward_sum / num_sims
+    root._mcts_boundary_reach_frac = total_boundary_sims / num_sims
+    root._mcts_sign_changes_mean = total_sign_changes / num_sims
 
 
-def _select_action(training_steps, node, config, action_space_size):
+def _select_action(training_steps, node, config, action_space_size,
+                   deterministic=False, temperature_override=None):
     visit_counts = [
         (child.visit_count, action)
         for action, child in node.children.items()
     ]
-    t = get_temperature(training_steps, config)
+    if deterministic:
+        _, action = max(visit_counts)
+        return action
+    t = temperature_override if temperature_override is not None else get_temperature(training_steps, config)
     return _softmax_sample(visit_counts, t, action_space_size)
 
 
@@ -144,7 +191,8 @@ def _ucb_score(config, parent, child, min_max_stats):
         )
     else:
         value_score = 0
-    return prior_score + value_score
+    search_bonus = getattr(config, 'plan_cost_search_bonus_weight', 0.0) * child.search_bonus
+    return prior_score + value_score + search_bonus
 
 
 def _expand_node(node, actions, network_output, reward):

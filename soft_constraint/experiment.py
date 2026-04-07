@@ -97,6 +97,8 @@ def append_to_registry(output_dir, run_id, config, metrics):
         'lambda_g': config.surrogate.lambda_g,
         'lambda_r': config.surrogate.lambda_r,
         'lambda_aux': config.surrogate.lambda_aux,
+        'loss_mode': config.surrogate.loss_mode,
+        'delta': config.surrogate.delta,
     }
     entry.update(metrics)
     registry_path = os.path.join(output_dir, 'run_registry.jsonl')

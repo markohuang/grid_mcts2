@@ -123,7 +123,7 @@ if __name__ == '__main__':
     from absl import app
     from ml_collections import config_flags
 
-    CONFIG = config_flags.DEFINE_config_file('cfg', default='config2.py:trm_dit/iter_T1N4')
+    CONFIG = config_flags.DEFINE_config_file('cfg', default='config2.py:trm_dit/iter_T4N4')
 
     def main(_):
         train(cfg=CONFIG.value)

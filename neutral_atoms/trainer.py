@@ -257,11 +257,15 @@ class AlphaAtomsTrainer:
             losses = model(batch)
             optimizer.zero_grad()
             fabric.backward(losses['total'])
+            grad_norm = sum(
+                p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None
+            ) ** 0.5
             fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)
             optimizer.step()
             model.t_nnet.update(model.nnet.parameters())
             model._training_steps += 1
             last_losses = {k: (v.item() if hasattr(v, 'item') else v) for k, v in losses.items()}
+            last_losses['grad_norm'] = round(grad_norm, 4)
 
             if (iteration + 1) % cfg.log_interval == 0:
                 print(f"  step {iteration+1}/{cfg.training_steps}, "

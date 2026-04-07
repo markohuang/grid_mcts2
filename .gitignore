@@ -47,3 +47,6 @@ deprecated/
 *.txt
 
 **/wandb
+
+.codex
+outputs_ir/

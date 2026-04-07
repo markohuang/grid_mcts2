@@ -33,6 +33,11 @@ class Game:
         self.current_qubit_cache = []
         self.mcts_depths = []
         self.mcts_reward_fracs = []
+        self.mcts_reward_sum_means = []
+        self.mcts_reward_sum_stds = []
+        self.mcts_reward_abs_sum_means = []
+        self.mcts_boundary_reach_fracs = []
+        self.mcts_sign_changes_means = []
 
     def terminal(self):
         return self.done or not self.environment.legal_actions()
@@ -71,6 +76,11 @@ class Game:
         self.root_values.append(root.value())
         self.mcts_depths.append(getattr(root, '_mcts_avg_depth', 0))
         self.mcts_reward_fracs.append(getattr(root, '_mcts_reward_frac', 0))
+        self.mcts_reward_sum_means.append(getattr(root, '_mcts_reward_sum_mean', 0))
+        self.mcts_reward_sum_stds.append(getattr(root, '_mcts_reward_sum_std', 0))
+        self.mcts_reward_abs_sum_means.append(getattr(root, '_mcts_reward_abs_sum_mean', 0))
+        self.mcts_boundary_reach_fracs.append(getattr(root, '_mcts_boundary_reach_frac', 0))
+        self.mcts_sign_changes_means.append(getattr(root, '_mcts_sign_changes_mean', 0))
 
     def cache_observation(self):
         obs = self.environment._get_observation()

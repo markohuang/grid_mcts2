@@ -318,6 +318,25 @@ class TestLayerLevelMDP:
         # Different action sequences should give different total rewards
         assert totals[0] != totals[1]
 
+    def test_track_plan_delta_reports_surrogate_without_changing_reward_mode(self):
+        config = get_config()
+        config.map_num = 1
+        config.env.reward_mode = 'layer_delta'
+        config.env.track_plan_delta = True
+        set_derived_config(config)
+        m = MAPS[1]
+        initial_positions = atom_map_to_positions(m['atom_map'], config.env.board_width)
+        env = NeutralAtomsEnv(m['tasks'], initial_positions, config.env)
+        env.reset()
+        action = env.legal_actions()[0]
+        before = env._compute_remaining_cost()
+        prev_layer_cost = env._current_layer_cost
+        result = env.step(action)
+        assert 'plan_cost_delta' in result.info
+        assert result.info['plan_cost_delta'] == before - env._compute_remaining_cost()
+        # Reward should still come from layer_delta, not be overwritten by plan_cost tracking.
+        assert result.reward == prev_layer_cost - env._current_layer_cost
+
 
 def run_tests():
     test_classes = [

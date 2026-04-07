@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Layer-level MDP** (Phase 0B complete). The "execute immediately" attractor from the old MDP is eliminated — there is no GATE_ACTION. The agent places atoms one at a time per layer, and layers auto-execute when all relevant atoms are placed. Episodes are deterministic length (`sum(k_t)` where `k_t` = relevant atoms per layer). Action space = `board_size` (~12-25) instead of the old `1 + Q * board_size` (~129). 100% completion rate by construction.
 
-Next: **Round 04 experiments** (validate new MDP) and **Phase 1** (Iterative Refinement Model). See `docs/iterative_refinement_reference.md` and `roadmap.md`.
+Rounds 04/04b validated the new MDP (Map 1 best=7, near lower bound of 6; Map 2 best=12 on 5×5). Round 05 is exploring specialist vs generalist training on 8×8 maps (Maps 3/4). See `experiments/README.md` for the full experiment index.
 
 ## Setup
 
@@ -103,7 +103,7 @@ Each epoch: **self-play** (MCTS generates games) → **compute metrics** → **t
 ### Environment (`env.py`, `board.py`, `moves.py`, `rewards.py`)
 
 - Actions: cell index (0..board_size-1) — where to place the current qubit
-- Reward is dense: every step compares current-layer cost before vs after the action (computed before auto-execute). Uses current layer only (not all remaining layers) to break the telescoping sum that made cumulative reward constant.
+- Reward is dense: default mode `plan_cost` computes `remaining_cost` (sum of all remaining layer costs) before and after the move, but **before** the auto-execute state change (`tasks_done++`, `current_phase_moves` clearing). The delta is the reward. This avoids telescoping (total reward = constant) while providing cross-layer signal. Other modes: `layer_delta` (current layer only), `layer_completion` (sparse, at layer boundaries), `remaining_cost` (−cost/episode_length at each step).
 - `compute_reward(prev_cost, curr_cost, reward_scale) -> float`
 - Env tracks `total_move_distance` (Manhattan distance of all moves) — used for latency value target at terminal.
 - Parallel grouping uses the AOD constraint: two atom moves can execute simultaneously only if they don't cross in rows or columns. Implemented as vectorized pairwise compatibility check + greedy graph coloring.
@@ -125,11 +125,25 @@ Standard AlphaZero MCTS with environment cloning for simulation. Uses UCB select
 
 Each run creates `outputs/<run_id>/` with:
 - `config.json` — frozen ConfigDict snapshot
+- `manifest.json` — run intent metadata (`study`, `hypothesis`, `variant`, `tags`, `notes`, `parent_run`, git commit, argv)
 - `checkpoints/` — periodic + final model checkpoints (Lightning Fabric)
 - `solutions/best.json` — atom-viz compatible JSON (board, circuit, plan)
 - `solutions/best_trace.json` — per-step trace with action type (move/noop), qubit/src/dst, cost before/after, reward
 
 `outputs/run_registry.jsonl` tracks all completed runs with config + metrics.
+
+Recommended launch metadata:
+
+```bash
+../grid_mcts2/.venv/bin/python main.py \
+  --config.experiment.study=round08_reward_signal \
+  --config.experiment.hypothesis=H1 \
+  --config.experiment.variant=control \
+  --config.experiment.tags=reward,baseline \
+  --config.experiment.notes="plan_cost baseline on map2"
+```
+
+Use `python analyze.py --study <study>` to compare runs from the same decision batch, or `python analyze.py <run_id>` for per-epoch metrics.
 
 Early stopping: training halts if `best_cost` doesn't improve for `experiment.early_stopping_patience` epochs (only counts epochs with completed games).
 

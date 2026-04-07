@@ -122,9 +122,12 @@ def _chromatic_number(adj: np.ndarray) -> int:
 
 def optimal_count_groups(moves: Moves, canonicalize: bool = False) -> int:
     """Exact minimum parallel groups (chromatic number). Feasible for N≤15.
-    With canonicalize=True, enumerates all 2^N direction assignments."""
+    With canonicalize=True, enumerates all 2^N direction assignments.
+    Falls back to greedy count_groups for N>15 to avoid exponential blowup."""
     if len(moves) == 0:
         return 0
+    if len(moves) > 15:
+        return count_groups(moves, canonicalize)
     if not canonicalize:
         adj = (~is_parallel_executable_batch(moves))
         adj.fill_diagonal_(False)
