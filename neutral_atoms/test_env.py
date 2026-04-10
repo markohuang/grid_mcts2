@@ -338,6 +338,64 @@ class TestLayerLevelMDP:
         assert result.reward == prev_layer_cost - env._current_layer_cost
 
 
+class TestGameSerialization:
+    def test_to_dict_from_dict_roundtrip(self):
+        config = get_config()
+        config.map_num = 1
+        set_derived_config(config)
+        m = MAPS[1]
+        initial_positions = atom_map_to_positions(m['atom_map'], config.env.board_width)
+        from .game import Game
+        from .mcts import play_game
+        from .network import Network
+        net = Network(config.network, use_fake=True)
+        game = Game(config, m['tasks'], initial_positions)
+        game = play_game(game, config.mcts, net)
+        game.cache_observation()
+        d = game.to_dict()
+        restored = Game.from_dict(d, config.env)
+        assert restored.history == game.history
+        assert restored.rewards == game.rewards
+        assert restored.child_visits == game.child_visits
+        assert restored.root_values == game.root_values
+        assert abs(restored.latency_reward - game.latency_reward) < 1e-6
+        assert restored.done == game.done
+        assert torch.equal(restored.environment.board, game.environment.board)
+        assert torch.equal(restored.environment.atom_positions, game.environment.atom_positions)
+
+    def test_map_class_and_id(self):
+        from .config import map_class, map_id
+        m = MAPS[1]  # 4x4 8q
+        mc = map_class(m)
+        assert mc == '4x4_08q_04g_03l'
+        mid = map_id(m)
+        assert len(mid) == 8
+        # Same map produces same id
+        assert map_id(m) == mid
+
+    def test_compact_size(self):
+        """Game dict should be much smaller than pre-computed features."""
+        config = get_config()
+        config.map_num = 1
+        set_derived_config(config)
+        m = MAPS[1]
+        initial_positions = atom_map_to_positions(m['atom_map'], config.env.board_width)
+        from .game import Game
+        from .mcts import play_game
+        from .network import Network
+        net = Network(config.network, use_fake=True)
+        game = Game(config, m['tasks'], initial_positions)
+        game = play_game(game, config.mcts, net)
+        game.cache_observation()
+        d = game.to_dict()
+        import io, torch
+        buf = io.BytesIO()
+        torch.save(d, buf)
+        dict_size = buf.tell()
+        # Should be under 50KB for a single game
+        assert dict_size < 50_000, f"Game dict too large: {dict_size} bytes"
+
+
 def run_tests():
     test_classes = [
         TestIsParallelExecutableBatch,

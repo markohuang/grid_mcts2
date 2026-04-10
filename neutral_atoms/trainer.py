@@ -9,6 +9,48 @@ from .mcts import play_game
 from .network import Network
 
 
+def game_to_tensordict(game, td_steps):
+    features, bootstrap_features = [], []
+    cvals, lvals, pis, bvals = [], [], [], []
+    current_qubits = []
+    for i in range(len(game.history)):
+        obs = game.make_observation(i)
+        bootstrap_obs = game.make_observation(min(i + td_steps, len(game.history)))
+        target = game.make_target(i, td_steps)
+        features.append(obs['features'].float())
+        bootstrap_features.append(bootstrap_obs['features'].float())
+        cvals.append(target.correctness_value)
+        lvals.append(target.latency_value)
+        pis.append(target.policy)
+        bvals.append(target.bootstrap_discount)
+        current_qubits.append(obs.get('current_qubit', -1))
+    return TensorDict({
+        ('obs', 'features'): torch.stack(features),
+        ('obs', 'current_qubit'): torch.tensor(current_qubits, dtype=torch.long),
+        ('bootstrap_obs', 'features'): torch.stack(bootstrap_features),
+        ('target', 'correctness_values'): torch.tensor(cvals, dtype=torch.float32),
+        ('target', 'latency_values'): torch.tensor(lvals, dtype=torch.float32),
+        ('target', 'policies'): torch.tensor(pis, dtype=torch.float32),
+        ('target', 'bootstrap_discounts'): torch.tensor(bvals, dtype=torch.float32),
+    }, batch_size=len(game.history))
+
+
+def load_dataset_into_buffer(dataset_dir, env_config, td_steps, buffer,
+                             filter_class=None, filter_map_id=None):
+    from .data import scan_dataset, load_game_batches
+    batch_files = scan_dataset(dataset_dir, filter_class=filter_class,
+                               filter_map_id=filter_map_id)
+    game_dicts = load_game_batches(batch_files)
+    loaded = 0
+    for gd in game_dicts:
+        game = Game.from_dict(gd, env_config)
+        game.cache_observation()  # populate observation_cache for make_observation
+        td = game_to_tensordict(game, td_steps)
+        buffer.extend(td)
+        loaded += 1
+    return loaded
+
+
 def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake):
     torch.set_num_threads(1)
     import ml_collections
@@ -198,30 +240,7 @@ class AlphaAtomsTrainer:
         return games
 
     def save_game(self, game, game_cost=None):
-        td_steps = self.config.training.td_steps
-        features, bootstrap_features = [], []
-        cvals, lvals, pis, bvals = [], [], [], []
-        current_qubits = []
-        for i in range(len(game.history)):
-            obs = game.make_observation(i)
-            bootstrap_obs = game.make_observation(min(i + td_steps, len(game.history)))
-            target = game.make_target(i, td_steps)
-            features.append(obs['features'].float())
-            bootstrap_features.append(bootstrap_obs['features'].float())
-            cvals.append(target.correctness_value)
-            lvals.append(target.latency_value)
-            pis.append(target.policy)
-            bvals.append(target.bootstrap_discount)
-            current_qubits.append(obs.get('current_qubit', -1))
-        observations = TensorDict({
-            ('obs', 'features'): torch.stack(features),
-            ('obs', 'current_qubit'): torch.tensor(current_qubits, dtype=torch.long),
-            ('bootstrap_obs', 'features'): torch.stack(bootstrap_features),
-            ('target', 'correctness_values'): torch.tensor(cvals, dtype=torch.float32),
-            ('target', 'latency_values'): torch.tensor(lvals, dtype=torch.float32),
-            ('target', 'policies'): torch.tensor(pis, dtype=torch.float32),
-            ('target', 'bootstrap_discounts'): torch.tensor(bvals, dtype=torch.float32),
-        }, batch_size=len(game.history))
+        observations = game_to_tensordict(game, self.config.training.td_steps)
         indices = self.replay_buffer.extend(observations)
         if self.priority_exponent > 0 and game_cost is not None and game_cost > 0:
             priority = (1.0 / game_cost) ** self.priority_exponent

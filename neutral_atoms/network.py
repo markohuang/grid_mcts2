@@ -13,24 +13,35 @@ from einops.layers.torch import Rearrange
 # ---- Feature Construction ----
 
 def make_features(observation: dict, tasks: list) -> torch.Tensor:
-    """Convert raw env observation to network features.
+    """Convert raw env observation to network features with cross-positional pair encoding.
 
     Returns: (num_tasks+1, board_size, num_qubits) tensor.
-    Slot 0 is the raw board state with current qubit marker.
-    Slots 1..num_tasks encode board state + gate pair indicators for each task layer.
+    Slot 0: board state — board_feat[cell, qubit] = 1.0 if qubit occupies cell.
+    Slots 1..num_tasks: board state + cross-positional gate pair markers.
+      For each gate pair (q1, q2) in layer t (where t >= tasks_done):
+        feat[cell_of_q1, q2] = 1.0  (mark partner identity at partner's position)
+        feat[cell_of_q2, q1] = 1.0
+      This encodes both the pairing structure and spatial relationship between
+      gate partners, which is critical for predicting parallel group cost.
     """
     board_onehot = observation['board_onehot']  # (board_size, num_qubits+1)
     board_feat = board_onehot[:, :-1]  # (board_size, num_qubits) drop empty channel
     tasks_done = observation['tasks_done']
     num_tasks = len(tasks)
+    num_qubits = board_feat.shape[1]
+
+    # Build qubit-to-cell mapping from the board one-hot encoding
+    qubit_cells = board_feat.argmax(dim=0)  # (num_qubits,) — cell index per qubit
+    qubit_present = board_feat.sum(dim=0) > 0  # which qubits are on the board
 
     features = [board_feat.clone()]  # slot 0: raw board state
     for t in range(num_tasks):
         feat = board_feat.clone()
         if t >= tasks_done:
             for q1, q2 in tasks[t]:
-                feat[:, q1] += 1.0
-                feat[:, q2] += 1.0
+                if qubit_present[q1] and qubit_present[q2]:
+                    feat[qubit_cells[q1], q2] = 1.0
+                    feat[qubit_cells[q2], q1] = 1.0
         features.append(feat)
     return torch.stack(features)  # (num_tasks+1, board_size, num_qubits)
 
@@ -168,28 +179,41 @@ class ValueNetwork(nn.Module):
         self.ntasks = cfg.num_tasks + 1
         self.nqubits = cfg.num_qubits
         self.board_size = cfg.board_size
-        self.mixer1 = MLPMixer(
-            channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.v_hsize,
-            image_size=(self.nqubits, 1), patch_size=1
-        )
-        self.register_buffer('qubit_emb', make_qubit_embedding(self.nqubits, cfg.v_hsize))
-        self.mixer2 = MLPMixer(
-            channels=self.nqubits * cfg.v_hsize, depth=cfg.mlp_depth,
-            dim=cfg.v_hsize, image_size=(self.ntasks, 1), patch_size=1
-        )
-        self.W_correctness = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
-        self.W_latency = nn.Linear(self.ntasks * cfg.v_hsize, cfg.num_bins)
+        dim = cfg.v_hsize
+        # Stage 1: project board features to qubit embeddings, then self-attend over qubits.
+        # Self-attention lets the network learn to attend to gate partners dynamically,
+        # which is critical for computing pairwise costs (parallel group counting).
+        self.proj_in = nn.Linear(self.board_size, dim)
+        self.qubit_emb = nn.Parameter(torch.randn(1, self.nqubits, dim) * 0.02)
+        qubit_layer = nn.TransformerEncoderLayer(
+            d_model=dim, nhead=max(1, dim // 16), dim_feedforward=dim * 4,
+            dropout=0.0, batch_first=True)
+        self.qubit_attn = nn.TransformerEncoder(qubit_layer, num_layers=cfg.mlp_depth)
+        # Stage 2: aggregate qubit representations per task, then attend over tasks.
+        # This lets the network reason about cross-layer dependencies.
+        self.task_proj = nn.Linear(self.nqubits * dim, dim)
+        task_layer = nn.TransformerEncoderLayer(
+            d_model=dim, nhead=max(1, dim // 16), dim_feedforward=dim * 4,
+            dropout=0.0, batch_first=True)
+        self.task_attn = nn.TransformerEncoder(task_layer, num_layers=max(1, cfg.mlp_depth // 2))
+        self.W_correctness = nn.Linear(self.ntasks * dim, cfg.num_bins)
+        self.W_latency = nn.Linear(self.ntasks * dim, cfg.num_bins)
         for w in [self.W_correctness, self.W_latency]:
             w.weight.data /= 100
             w.bias.data /= 100
 
     def forward(self, grids):
         bs, ntasks = grids.shape[:2]
-        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))  # (bs*ntasks, nqubits, v_hsize)
-        x = x + self.qubit_emb  # inject qubit identity
-        x = self.mixer2(
-            x.reshape(bs, ntasks, -1).permute(0, 2, 1).unsqueeze(-1)
-        )
+        # grids: (bs, ntasks, board_size, nqubits)
+        # Transpose to (bs*ntasks, nqubits, board_size) so each qubit sees all cells
+        x = grids.flatten(0, 1).permute(0, 2, 1)  # (bs*ntasks, nqubits, board_size)
+        x = self.proj_in(x)  # (bs*ntasks, nqubits, dim)
+        x = x + self.qubit_emb
+        x = self.qubit_attn(x)  # (bs*ntasks, nqubits, dim) — qubits attend to partners
+        # Aggregate over qubits, attend over tasks
+        x = x.reshape(bs, ntasks, -1)  # (bs, ntasks, nqubits*dim)
+        x = self.task_proj(x)  # (bs, ntasks, dim)
+        x = self.task_attn(x)  # (bs, ntasks, dim)
         flat = x.flatten(1)
         return self.W_correctness(flat), self.W_latency(flat)
 
@@ -200,31 +224,40 @@ class PolicyNetwork(nn.Module):
         self.ntasks = cfg.num_tasks + 1
         self.nqubits = cfg.num_qubits
         self.board_size = cfg.board_size
-        self.mixer1 = MLPMixer(
-            channels=self.board_size, depth=cfg.mlp_depth, dim=cfg.p_hsize,
-            image_size=(self.nqubits, 1), patch_size=1
-        )
-        self.register_buffer('qubit_emb', make_qubit_embedding(self.nqubits, cfg.p_hsize))
-        self.mixer2 = MLPMixer(
-            channels=self.ntasks * cfg.p_hsize, depth=cfg.mlp_depth,
-            dim=cfg.p_hsize, image_size=(self.nqubits, 1), patch_size=1
-        )
-        self.W_pi = nn.Linear(cfg.p_hsize, self.board_size)
+        dim = cfg.p_hsize
+        # Stage 1: per-task qubit attention (same structure as ValueNetwork).
+        self.proj_in = nn.Linear(self.board_size, dim)
+        self.qubit_emb = nn.Parameter(torch.randn(1, self.nqubits, dim) * 0.02)
+        qubit_layer = nn.TransformerEncoderLayer(
+            d_model=dim, nhead=max(1, dim // 16), dim_feedforward=dim * 4,
+            dropout=0.0, batch_first=True)
+        self.qubit_attn = nn.TransformerEncoder(qubit_layer, num_layers=cfg.mlp_depth)
+        # Stage 2: cross-task attention per qubit.
+        # Reshape so each qubit's representations across tasks can attend to each other,
+        # then project to per-qubit cell logits.
+        self.task_proj = nn.Linear(self.ntasks * dim, dim)
+        task_layer = nn.TransformerEncoderLayer(
+            d_model=dim, nhead=max(1, dim // 16), dim_feedforward=dim * 4,
+            dropout=0.0, batch_first=True)
+        self.task_attn = nn.TransformerEncoder(task_layer, num_layers=max(1, cfg.mlp_depth // 2))
+        self.W_pi = nn.Linear(dim, self.board_size)
         self.W_pi.weight.data /= 100
         self.W_pi.bias.data /= 100
         self.softplus = nn.Softplus()
 
     def forward(self, grids):
         bs, ntasks = grids.shape[:2]
-        x = self.mixer1(grids.flatten(0, 1).unsqueeze(-1))  # (bs*ntasks, nqubits, p_hsize)
-        x = x + self.qubit_emb  # inject qubit identity
+        # grids: (bs, ntasks, board_size, nqubits)
+        x = grids.flatten(0, 1).permute(0, 2, 1)  # (bs*ntasks, nqubits, board_size)
+        x = self.proj_in(x)  # (bs*ntasks, nqubits, dim)
+        x = x + self.qubit_emb
+        x = self.qubit_attn(x)  # (bs*ntasks, nqubits, dim) — qubits attend to partners
+        # Reshape to per-qubit cross-task: (bs, nqubits, ntasks*dim)
         _, nqubits, dim = x.shape
-        x = self.mixer2(
-            x.reshape(bs, ntasks, nqubits, dim, 1)
-             .permute(0, 1, 3, 2, 4)
-             .flatten(1, 2)
-        )
-        # x: (bs, nqubits, p_hsize) — per-qubit policy logits
+        x = x.reshape(bs, ntasks, nqubits, dim)
+        x = x.permute(0, 2, 1, 3).reshape(bs, nqubits, ntasks * dim)  # (bs, nqubits, ntasks*dim)
+        x = self.task_proj(x)  # (bs, nqubits, dim)
+        x = self.task_attn(x)  # (bs, nqubits, dim) — per-qubit cross-task reasoning
         return self.softplus(self.W_pi(x))  # (bs, nqubits, board_size)
 
 

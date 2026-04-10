@@ -30,9 +30,16 @@ class NeutralAtomsEnv:
         self.episode_length = sum(len(atoms) for atoms in self.layer_relevant_atoms)
 
     def _precompute_gate_indicators(self):
-        """Precompute per-layer gate indicator vectors: (num_tasks, num_qubits).
-        gate_indicators[t, q] = 1.0 if qubit q participates in any gate pair in layer t.
+        """Precompute per-layer gate pair structure: (num_tasks, num_qubits, num_qubits).
+        _gate_pair_matrix[t, q1, q2] = 1.0 if (q1, q2) is a gate pair in layer t.
+        Used for cross-positional pair encoding in get_features().
         """
+        self._gate_pair_matrix = torch.zeros(self.num_tasks, self.num_qubits, self.num_qubits)
+        for t, layer in enumerate(self.tasks):
+            for q1, q2 in layer:
+                self._gate_pair_matrix[t, q1, q2] = 1.0
+                self._gate_pair_matrix[t, q2, q1] = 1.0
+        # Flat participation flags (backward compat, used by some reward calcs)
         gi = torch.zeros(self.num_tasks, self.num_qubits)
         for t, layer in enumerate(self.tasks):
             for q1, q2 in layer:
@@ -226,18 +233,29 @@ class NeutralAtomsEnv:
         return get_legal_actions_for_qubit(self.board, self.atom_positions, self.current_qubit)
 
     def get_features(self) -> torch.Tensor:
-        """Build feature tensor from cached board_feat + precomputed gate indicators.
+        """Build feature tensor with cross-positional gate pair encoding.
         Returns: (num_tasks+1, board_size, num_qubits) tensor.
+
+        Slot 0: board_feat[cell, qubit] = 1.0 if qubit occupies cell.
+        Slot t+1 (for remaining layers t >= tasks_done):
+          board_feat + cross-positional pair markers.
+          For each gate pair (q1, q2) in layer t:
+            feat[cell_of_q1, q2] = 1.0  (mark partner q2 at q1's position)
+            feat[cell_of_q2, q1] = 1.0  (mark partner q1 at q2's position)
+          This encodes both WHO pairs with whom AND WHERE they are,
+          enabling the network to reason about pairwise distances.
         """
-        # Single expand+clone instead of num_tasks+1 separate clones
         features = self._board_feat.unsqueeze(0).expand(
             self.num_tasks + 1, -1, -1
         ).clone()
-        # Vectorized gate indicator addition for remaining layers
         if self.tasks_done < self.num_tasks:
-            # gate_indicators[tasks_done:] has shape (remaining, num_qubits)
-            # broadcast across board_size dimension
-            features[self.tasks_done + 1:] += self._gate_indicators[self.tasks_done:].unsqueeze(1)
+            # _gate_pair_matrix[t]: (num_qubits, num_qubits) adjacency
+            # _board_feat: (board_size, num_qubits) with 1.0 at occupied cells
+            # Matmul: _board_feat @ _gate_pair_matrix[t] produces (board_size, num_qubits)
+            # where entry [cell, q2] = 1.0 if cell is occupied by some q1 that pairs with q2.
+            # This is exactly the cross-positional encoding.
+            for t in range(self.tasks_done, self.num_tasks):
+                features[t + 1] += self._board_feat @ self._gate_pair_matrix[t]
         return features
 
     def clone(self) -> 'NeutralAtomsEnv':
@@ -258,6 +276,7 @@ class NeutralAtomsEnv:
         new_env.layer_relevant_atoms = self.layer_relevant_atoms
         new_env.episode_length = self.episode_length
         new_env._gate_indicators = self._gate_indicators  # immutable precomputed
+        new_env._gate_pair_matrix = self._gate_pair_matrix  # immutable precomputed
         new_env._gate_pair_indices = self._gate_pair_indices  # immutable precomputed
         # Mutable state (must clone)
         new_env.board = self.board.clone()

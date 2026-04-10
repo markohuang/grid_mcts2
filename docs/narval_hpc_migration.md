@@ -1,352 +1,246 @@
-# HPC Migration Plan: Narval (Digital Alliance of Canada)
+# HPC Scale-Up Plan: Distributed Self-Play on Narval
 
-## Context
+## Big Picture
 
-**Bottleneck:** MCTS simulation count (`num_simulations`) is the primary compute bottleneck. Each simulation is a sequential CPU-bound tree traversal. The current training loop runs self-play on CPU workers via `ProcessPoolExecutor` (forkserver), which works locally but doesn't scale beyond a single node.
+MCTS training quality scales with data volume — lc0 demonstrated that ~800 visits/move across hundreds of millions of games produces superhuman play. Our current single-machine setup generates ~20 games/epoch with 50-200 simulations/move, which is orders of magnitude below what's needed for the 5×5+ maps.
 
-**Goal:** Leverage Narval's A100 GPUs for training and many CPU cores for parallel self-play, enabling 10–100× more MCTS simulations per epoch.
+**Strategy:** Decouple self-play (CPU-intensive) from training (GPU-intensive).
+
+1. **Phase 1 (now):** Use Narval CPU nodes purely for massive self-play data generation. Build a structured dataset on `/project`. Manually rsync to a GPU machine for training.
+2. **Phase 2 (later):** Move to a cluster with both GPU and CPU nodes. Add async weight loop (workers pull latest weights, trainer consumes games continuously — the lc0 pattern).
+
+```
+Phase 1: Narval CPU → dataset on /project → rsync → GPU train elsewhere
+Phase 2: GPU+CPU cluster, async weight updates, continuous pipeline
+```
 
 ---
 
-## Narval Hardware Summary
+## Narval Hardware (CPU Allocation)
 
 | Resource | Spec |
 |---|---|
-| GPU | NVIDIA A100 40 GB HBM2e |
-| CPUs/node | Up to 64 (job-visible) |
+| CPUs/node | Up to 64 cores |
 | RAM/node | Up to 249 GB |
 | Max job duration | 7 days (168 hours) |
 | Interconnect | 100 Gb/s Ethernet |
-| Storage | `/home` (small), `/scratch` (large, purged), `/project` (persistent) |
-| Local job storage | `$SLURM_TMPDIR` (fast NVMe, job-lifetime only) |
-
-**Self-play math:** With `N` CPU workers each running 1 game, and branching factor ~12–15, 200 simulations per move, and ~30–40 moves per episode, each game takes roughly `200 * 30 * (env_clone + net_inference)` operations. On Narval you can realistically run 32–48 workers simultaneously per node, giving ~32–48× speedup in self-play throughput vs. 1 sequential game.
+| `/home` | Small quota, **read-only on compute nodes** |
+| `/scratch` | Large, read/write, purged after 60 days inactive |
+| `/project` | Persistent, read/write, shared across group |
+| `$SLURM_TMPDIR` | Fast node-local NVMe, job-lifetime only |
 
 ---
 
-## Phase 0: Account & Environment Setup
+## Target Scale
 
-**Checkpoint:** Can `ssh narval.alliancecan.ca` and run a Python import successfully.
+**200k games at 5×5 with `num_simulations=1000`:**
+- Episode length ≈ 30 steps (sum of relevant atoms across 3 layers)
+- Per game: 30 steps × 1000 sims × 1 network inference/sim = 30k inferences
+- On 1 CPU core, ~100 inferences/sec (small MLP) → ~300 sec/game → ~5 min/game
+- On 100 nodes × 60 cores = 6000 workers → ~33 games/sec → **200k games in ~1.7 hours**
+- Dataset size: 200k games × ~4 KB/game (raw format) ≈ **800 MB**
 
-### Steps
+For context, lc0 generates billions of positions. 200k games × 30 positions = 6M positions — a modest start that validates the infrastructure before scaling further.
 
-1. **Get DRAC account** — apply at `ccdb.alliancecan.ca`, join your PI's allocation group.
+---
 
-2. **Transfer code**
+## Dataset Format
+
+### Directory structure
+
+```
+/project/<user>/grid_mcts2/datasets/<dataset_name>/
+├── manifest.json                          # dataset metadata, config snapshot
+├── maps/
+│   └── <map_id>.json                      # full map spec per unique map
+└── games/
+    └── <map_class>/                       # e.g., 5x5_12q_04g_03l
+        └── <map_id>/                      # e.g., a3f7c2e1
+            ├── batch_node01_000001.pt     # list of compact game dicts
+            ├── batch_node01_000002.pt
+            └── batch_node37_000042.pt
+```
+
+### Map taxonomy
+
+**map_class** = `{H}x{W}_{Q:02d}q_{G:02d}g_{L:02d}l`
+- Encodes board dimensions, qubit count, max gates/layer, number of layers
+- Example: `5x5_12q_04g_03l` = 5×5 board, 12 qubits, 4 gates/layer, 3 layers
+- Used for filtering: "give me all 5×5 games" or "train a specialist on this map class"
+
+**map_id** = `md5(canonical_json(sorted_atom_map, sorted_tasks))[:8]`
+- Unique per specific map instance (atom positions + gate assignments)
+- Two maps in the same class but with different atom layouts get different IDs
+- Used for: specialist training on a single map, or tracking per-map performance
+
+### Game serialization (compact)
+
+Each game is stored as a plain dict (not pre-computed TensorDict):
+
+```python
+{
+    'map_id': 'a3f7c2e1',
+    'map_class': '5x5_12q_04g_03l',
+    'history': [3, 7, 12, ...],           # action indices
+    'rewards': [0.0, -0.5, ...],          # per-step rewards
+    'child_visits': [[0.1, 0.0, ...], ...],  # MCTS visit distributions
+    'root_values': [1.2, 0.8, ...],       # MCTS root values
+    'latency_reward': -0.3,               # terminal latency signal
+    'num_simulations': 1000,              # MCTS sims used
+    'weight_gen': 0,                      # which weight generation produced this
+}
+```
+
+**~4 KB/game** vs ~300 KB for pre-computed features. The trainer replays actions through the env to reconstruct features on-the-fly — this is fast (no MCTS, just `env.step()` calls) and decouples the data format from the feature representation.
+
+### Batch files
+
+Each `.pt` file contains a list of game dicts (one worker's output batch, typically 60 games). Using `torch.save`/`torch.load` for simplicity. Files are written atomically (write to `.tmp`, then `os.rename`).
+
+---
+
+## Architecture
+
+### Self-play workers (`selfplay_worker.py`)
+
+Each SLURM task runs on one node with 60 CPU cores:
+
+```
+1. Load config + optional network weights
+2. Spawn 60 ProcessPoolExecutor workers
+3. Each worker plays 1 game (MCTS with num_simulations=1000)
+4. Collect finished games into a batch
+5. Save batch to /project/.../games/pending/<node_id>_batch_<seq>.pt
+6. Repeat until wall-time limit or target game count reached
+```
+
+Workers are stateless — they read weights once at startup (Phase 1) or poll for updates (Phase 2). No inter-node communication.
+
+### SLURM job array
+
+```bash
+#SBATCH --array=0-99          # 100 nodes
+#SBATCH --cpus-per-task=64    # all cores
+#SBATCH --mem=64G
+#SBATCH --time=3:00:00
+```
+
+Each array task writes to the same dataset directory on `/project`. No race conditions because each task writes to uniquely-named files (includes `$SLURM_ARRAY_TASK_ID` in filename).
+
+### Trainer (runs elsewhere, Phase 1)
+
+After rsync-ing the dataset:
+
+```python
+# Load all games from dataset, filtering by map_class or map_id
+buffer = load_dataset_into_buffer("datasets/run01/", filter_class="5x5_12q_04g_03l")
+# Train using existing fit() loop
+trainer.fit()
+```
+
+The trainer reconstructs TensorDict training samples from raw game dicts by replaying through the env. This reuses the existing `save_game()` logic in `trainer.py`.
+
+---
+
+## Code Changes
+
+### Files to modify
+
+| File | Change |
+|---|---|
+| `neutral_atoms/game.py` | Add `to_dict()` / `from_dict()` for compact serialization |
+| `neutral_atoms/config.py` | Add `map_class(map_data)` and `map_id(map_data)` utility functions |
+| `neutral_atoms/trainer.py` | Extract `game_to_tensordict(game, config)` from `save_game()`; add `load_dataset_into_buffer(path, filter_fn)` |
+| `neutral_atoms/experiment.py` | `fcntl.flock()` around `append_to_registry()` |
+
+### Files to create
+
+| File | Purpose |
+|---|---|
+| `neutral_atoms/data.py` | Dataset I/O: `atomic_save_batch()`, `scan_dataset()`, `dataset_stats()`, manifest management |
+| `selfplay_worker.py` | Entry point for CPU self-play on Narval |
+| `slurm/selfplay.sh` | SLURM job array script |
+
+### Files untouched
+
+`mcts.py`, `env.py`, `board.py`, `moves.py`, `rewards.py`, `network.py`, `main.py` — no changes. The existing synchronous `main.py` loop continues to work for local development.
+
+---
+
+## Phased Implementation
+
+### Phase 0: Narval Environment
+
+**Checkpoint:** `python main.py --config.use_fake=True --config.training.epochs=2` runs on Narval login node.
+
+1. Get DRAC account, join PI allocation
+2. Transfer code via rsync
+3. Set up virtualenv on `/project` (login node has internet)
    ```bash
-   rsync -avz --exclude='outputs/' --exclude='__pycache__/' \
-     ~/grid_mcts2_prior_learning/ \
-     narval:~/grid_mcts2_prior_learning/
-   ```
-
-3. **Set up Python environment** — Narval has no internet access from compute nodes; install from login node.
-   ```bash
-   # On Narval login node
-   module load StdEnv/2023 python/3.11 cuda/12.2
-
-   # Create a virtualenv in /project (persists across jobs)
-   python -m venv ~/projects/def-<pi>/shared/venvs/grid_mcts2
-   source ~/projects/def-<pi>/shared/venvs/grid_mcts2/bin/activate
-
-   # Install from Alliance pre-built wheels (fast, no compilation)
-   pip install --no-index torch torchvision
+   module load StdEnv/2023 python/3.11
+   python -m venv ~/projects/def-<pi>/venvs/grid_mcts2
+   source ~/projects/def-<pi>/venvs/grid_mcts2/bin/activate
+   pip install --no-index torch
    pip install lightning tensordict torchrl einops numpy ml_collections absl-py
    ```
-   > **Note:** Check `pip install --no-index --find-links ~/.local/lib` for available wheel versions, or use `avail_wheels torch` on the login node to list compatible builds.
+4. Smoke test with FakeNet
 
-4. **Smoke test** (run on login node, short)
-   ```bash
-   python main.py --config.use_fake=True --config.training.epochs=2 \
-     --config.training.num_parallel_games=2
-   ```
+### Phase 1: Self-Play Data Pipeline
 
-5. **Storage layout**
-   ```
-   ~/scratch/grid_mcts2/outputs/    ← active run outputs (fast I/O)
-   ~/projects/def-<pi>/grid_mcts2/checkpoints/  ← persistent checkpoints
-   ~/projects/def-<pi>/grid_mcts2/venvs/        ← virtualenv
-   ```
+**Checkpoint:** 100 SLURM array tasks each produce game batches on `/project`; `dataset_stats()` reports total games and per-map breakdowns.
+
+1. Implement `Game.to_dict()` / `from_dict()` + roundtrip test
+2. Implement `map_class()` / `map_id()` in config.py
+3. Build `neutral_atoms/data.py` — atomic writes, dataset scanning
+4. Build `selfplay_worker.py` — the CPU entry point
+5. Write `slurm/selfplay.sh` — job array submission
+6. Test locally: run worker with `--num_games=5 --num_workers=2`, verify dataset structure
+7. Test on Narval: small array (4 nodes), verify files land on `/project`
+8. Scale to 100 nodes, generate 200k games
+
+### Phase 2: Train from Dataset
+
+**Checkpoint:** Training on GPU machine using rsync'd dataset matches or exceeds locally-generated training quality.
+
+1. `game_to_tensordict()` extraction in trainer.py
+2. `load_dataset_into_buffer()` that filters by class/id
+3. Verify training loop works with dataset-loaded buffer
+4. rsync dataset from Narval, train on GPU machine
+
+### Phase 3: Async Weight Loop (Future)
+
+**Checkpoint:** Workers poll for weight updates; trainer publishes weights after each training cycle.
+
+1. Weight versioning: `weights/gen_{N:06d}.pt` + `weights/latest.pt` symlink
+2. Workers check `latest.pt` mtime, reload when changed
+3. `train_async.py` — continuous trainer that polls `games/pending/`, trains, publishes
+4. Move to GPU+CPU cluster
 
 ---
 
-## Phase 1: Single-Node GPU Job (Direct Port)
+## Narval Gotchas
 
-**Checkpoint:** A full training run completes on 1 A100 with correct metrics logged, checkpoints saved to `/scratch`.
+- **`/home` is read-only on compute nodes** — write outputs to `/scratch` or `/project`
+- **No internet on compute nodes** — pre-install all packages from login node
+- **SQLite on Lustre is unreliable** — use file-per-batch pattern instead of databases
+- **Atomic writes** — always write to `.tmp` then `os.rename()` for crash safety on Lustre
+- **`forkserver` context** — already used in `trainer.py:91`, correct for multiprocessing
+- **`torch.set_num_threads(1)`** — already set per worker in `trainer.py:13`, prevents CPU thrashing
+- **Scratch purge** — files inactive 60 days get deleted; copy important data to `/project`
+- **Max 1000 jobs queued** per user — plan array sizes accordingly
 
-### Job script: `slurm/train_single.sh`
+## Diagnostics
 
 ```bash
-#!/bin/bash
-#SBATCH --job-name=grid_mcts2
-#SBATCH --account=def-<pi>
-#SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=8          # self-play workers + training thread
-#SBATCH --mem=64G
-#SBATCH --time=12:00:00
-#SBATCH --output=slurm/logs/%j.out
+# On Narval
+sinfo -o "%P %l %C"               # partitions, time limits, CPU counts
+squeue -u $USER                    # running/pending jobs
+seff <JOBID>                       # efficiency report after completion
+sacct -j <JOBID> --format=Elapsed,MaxRSS,NCPUS  # resource usage
 
-module load StdEnv/2023 python/3.11 cuda/12.2
-source ~/projects/def-<pi>/grid_mcts2/venvs/grid_mcts2/bin/activate
-
-# Copy outputs dir to fast local storage, work there, copy back at end
-mkdir -p $SLURM_TMPDIR/outputs
-# If resuming, copy previous checkpoint:
-# cp ~/scratch/grid_mcts2/checkpoints/latest.ckpt $SLURM_TMPDIR/
-
-python main.py \
-  --config.map_num=2 \
-  --config.training.epochs=50 \
-  --config.training.num_selfplay=20 \
-  --config.training.num_parallel_games=6 \
-  --config.mcts.num_simulations=200 \
-  --config.training.batch_size=256 \
-  --config.training.training_steps=200 \
-  --config.training.accelerator=gpu \
-  --config.training.devices=1 \
-  --config.experiment.output_dir=$SLURM_TMPDIR/outputs
-
-# Copy results back to scratch
-cp -r $SLURM_TMPDIR/outputs/* ~/scratch/grid_mcts2/outputs/
-```
-
-### What to verify
-- `nvidia-smi` during job: GPU utilization >50% during training steps
-- `metrics.jsonl`: `selfplay_time` and `train_time` look reasonable
-- Checkpoint appears in `$SLURM_TMPDIR/outputs/<run_id>/checkpoints/`
-
----
-
-## Phase 2: CPU Self-Play Scaling
-
-**Checkpoint:** Self-play throughput scales near-linearly with `num_parallel_games` up to ~24 workers; selfplay_time / train_time ratio identified.
-
-### Key insight
-MCTS self-play is embarrassingly parallel at the game level — each game is fully independent. The current `ProcessPoolExecutor` (forkserver) implementation is already correct. On Narval, you can allocate 32–48 CPU cores and run that many games in parallel.
-
-### How to tune
-
-1. **Profile time split** — in `metrics.jsonl`, check `selfplay_time` vs `train_time` per epoch.
-   - If `selfplay_time >> train_time`: add more CPU workers or reduce simulations per game
-   - If `train_time >> selfplay_time`: increase `training_steps` or `batch_size`
-
-2. **Scale workers** — update job script:
-   ```bash
-   #SBATCH --cpus-per-task=32
-   ```
-   ```bash
-   python main.py \
-     --config.training.num_parallel_games=28 \    # leave ~4 cores for OS/training
-     --config.mcts.num_simulations=400 \
-     --config.training.num_selfplay=50
-   ```
-
-3. **Batched network inference** — current implementation calls `network.inference()` once per simulation leaf node (serial). This is the main per-worker bottleneck. At high simulation counts, the network overhead per simulation becomes dominant.
-   - At `num_simulations=50`: env clone dominates
-   - At `num_simulations=500+`: `network.inference()` dominates
-   - **Future optimization (Phase 4):** batch leaf evaluations across concurrent simulations (virtual loss + batch inference)
-
-4. **SLURM test job** to profile before committing to long runs:
-   ```bash
-   #SBATCH --time=1:00:00
-   # Run 3 epochs with varying num_parallel_games: 1, 8, 16, 32
-   # Read selfplay_time from metrics.jsonl
-   ```
-
----
-
-## Phase 3: Long Training via Job Chaining
-
-**Checkpoint:** A 200-epoch run can survive SLURM's 7-day wall-time limit by chaining dependent jobs that resume from checkpoint.
-
-### Problem
-SLURM max job time = 7 days. A long curriculum run (200+ epochs) may exceed this.
-
-### Solution: `--dependency=afterok`
-
-The existing `load_checkpoint` config flag + `curriculum_initial_phase` already support resumption. Wire this into a chain:
-
-**Submit script: `slurm/submit_chain.sh`**
-```bash
-#!/bin/bash
-# Usage: bash submit_chain.sh <num_jobs> <epochs_per_job> <checkpoint_dir>
-NUM_JOBS=${1:-3}
-EPOCHS=${2:-50}
-CKPT_DIR=${3:-~/scratch/grid_mcts2/checkpoints}
-CURRICULUM_MAPS=10
-
-JID=$(sbatch --parsable slurm/train_resume.sh "" 0 $EPOCHS $CURRICULUM_MAPS)
-echo "Job 1: $JID"
-
-for i in $(seq 2 $NUM_JOBS); do
-    JID=$(sbatch --parsable --dependency=afterok:$JID \
-        slurm/train_resume.sh $CKPT_DIR/job_${i-1}_final.ckpt \
-        $((($i-1)*$EPOCHS)) $EPOCHS $CURRICULUM_MAPS)
-    echo "Job $i: $JID (depends on previous)"
-done
-```
-
-**Resume-aware job script: `slurm/train_resume.sh`**
-```bash
-#!/bin/bash
-#SBATCH --job-name=grid_mcts2_resume
-#SBATCH --account=def-<pi>
-#SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
-#SBATCH --time=48:00:00
-#SBATCH --output=slurm/logs/%j.out
-
-CKPT_PATH=$1          # empty string = fresh start
-CURRICULUM_START=$2   # curriculum_initial_phase
-EPOCHS=$3
-CURRICULUM_MAPS=$4
-
-module load StdEnv/2023 python/3.11 cuda/12.2
-source ~/projects/def-<pi>/grid_mcts2/venvs/grid_mcts2/bin/activate
-
-LOAD_FLAG=""
-if [ -n "$CKPT_PATH" ]; then
-    LOAD_FLAG="--config.experiment.load_checkpoint=$CKPT_PATH"
-fi
-
-python main.py \
-  --config.map_num=2 \
-  --config.training.epochs=$EPOCHS \
-  --config.training.num_parallel_games=28 \
-  --config.mcts.num_simulations=400 \
-  --config.training.batch_size=256 \
-  --config.training.training_steps=200 \
-  --config.training.accelerator=gpu \
-  --config.experiment.output_dir=~/scratch/grid_mcts2/outputs \
-  --config.experiment.curriculum_maps=$CURRICULUM_MAPS \
-  --config.experiment.curriculum_initial_phase=$CURRICULUM_START \
-  $LOAD_FLAG
-
-# Copy final checkpoint to persistent project storage
-RUNID=$(ls -t ~/scratch/grid_mcts2/outputs | head -1)
-cp ~/scratch/grid_mcts2/outputs/$RUNID/checkpoints/final.ckpt \
-   ~/projects/def-<pi>/grid_mcts2/checkpoints/job_${SLURM_JOB_ID}_final.ckpt
-```
-
-> **Note:** `curriculum_initial_phase` tells `main.py` how many curriculum maps to pre-populate before epoch 0. This is critical for resumption — otherwise the map pool restarts from scratch.
-
----
-
-## Phase 4: Batched MCTS Inference (Major Throughput Improvement)
-
-**Checkpoint:** `network.inference()` is batched across N concurrent MCTS simulations; single-game simulation throughput increases by ~N×.
-
-### Context
-Currently `run_mcts()` calls `network.inference()` once per simulation, serially. On a GPU, the cost of a small batch vs. a single inference is nearly identical — so batching M leaf evaluations costs ~1 inference instead of M. This is the "virtual loss + batch evaluation" pattern used in production AlphaZero systems.
-
-### Design sketch
-
-This requires restructuring `run_mcts()` to run simulations in a coroutine-style (or breadth-first) pattern:
-
-```
-Instead of:
-  for sim in range(N):
-    traverse → leaf → network_call(1) → backprop
-
-Do:
-  batch_leaves = []
-  for sim in range(N):
-    traverse to leaf (with virtual loss) → collect leaf state
-    batch_leaves.append(leaf_state)
-
-  network_outputs = network.inference(batch_leaves)  # single GPU call
-
-  for sim, output in zip(sims, network_outputs):
-    expand + backprop
-```
-
-**Implementation notes:**
-- Virtual loss: temporarily add `-1` to a node's value during traversal so other simulations don't collapse to the same node
-- This is a moderate refactor of `mcts.py:run_mcts()`
-- Start with batch size = 8 or 16 (tune based on GPU utilization)
-- Prerequisite: `network.inference()` must accept batched `obs_features` (already supported for training, check inference path)
-
-**When to prioritize:** Only worth doing if profiling shows network inference is >30% of `selfplay_time`. At `num_simulations=200` on CPU with small maps, env cloning may still dominate.
-
----
-
-## Phase 5: Multi-Node Self-Play (Optional, Advanced)
-
-**Checkpoint:** Self-play workers run across multiple nodes, with a central training process that consumes games and broadcasts updated weights.
-
-### When needed
-Only if a single node (32–48 CPU cores) doesn't provide enough self-play throughput to keep the GPU saturated during training.
-
-### Architecture options
-
-**Option A: Embarrassingly parallel job array**
-- Submit N independent jobs, each doing self-play and saving games to shared `/scratch`
-- A separate training job reads from the shared buffer and periodically writes updated weights
-- Simplest; no inter-node communication needed
-- Limitation: stale weights (workers use checkpoint from start of job)
-
-**Option B: Ray or similar**
-- Use [Ray](https://docs.ray.io/en/latest/index.html) for distributed actor-based self-play
-- Workers are Ray actors; training is a separate actor; weights broadcast via Ray's object store
-- More complex setup on SLURM but well-supported (see `ray.init()` with SLURM integration)
-- Alliance Canada has [Ray docs](https://docs.alliancecan.ca/wiki/Ray)
-
-**Option C: torch.distributed + async replay**
-- Not recommended here — designed for gradient synchronization, not actor-critic RL
-
-**Recommendation:** Start with Option A (job array) as it requires zero code changes. Move to Ray only if staleness becomes a measurable training quality issue.
-
----
-
-## Milestone Summary
-
-| Phase | Goal | Key metric | Est. effort |
-|---|---|---|---|
-| 0 | Narval account + env | `python main.py --use_fake=True` runs | 1–2 days |
-| 1 | Single GPU job | 1 full run completes, metrics logged | 1 day |
-| 2 | CPU self-play scaling | selfplay_time vs train_time profiled, 28+ workers | 1 day |
-| 3 | Job chaining / long runs | 200-epoch run across multiple jobs | 1 day |
-| 4 | Batched MCTS inference | Single-game sim throughput profiled + improved | 3–5 days |
-| 5 | Multi-node (optional) | Only if Phase 2 saturates | variable |
-
----
-
-## Quick Diagnostics Cheat Sheet
-
-```bash
-# On Narval: check partitions and GPU availability
-sinfo -o "%P %G %l %C"
-
-# Check available Python/PyTorch wheels
-avail_wheels torch
-
-# Monitor your running jobs
-squeue -u $USER
-
-# Check efficiency of a completed job
-seff <JOBID>
-
-# Tail live output
-tail -f slurm/logs/<JOBID>.out
-
-# Check replay buffer throughput
-# In metrics.jsonl: selfplay_time / num_selfplay = time per game
+# Dataset health
 python -c "
-import json
-lines = open('outputs/<run_id>/metrics.jsonl').readlines()
-for l in lines[-5:]:
-    m = json.loads(l)
-    print(f'epoch={m[\"epoch\"]} sp={m[\"selfplay_time\"]}s train={m[\"train_time\"]}s')
+from neutral_atoms.data import dataset_stats
+dataset_stats('/project/.../datasets/run01/')
 "
 ```
-
----
-
-## Known Gotchas
-
-- **No internet on compute nodes**: pre-install everything from the login node; `pip install --no-index` uses Alliance pre-cached wheels.
-- **`forkserver` vs `fork`**: current code already uses `forkserver` context (`trainer.py:91`) — this is correct for CUDA-safe multiprocessing.
-- **`torch.set_num_threads(1)`**: already set per worker (`trainer.py:13`) — critical to prevent CPU thrashing when running 32 workers.
-- **`$SLURM_TMPDIR` is node-local**: don't write checkpoints there if you want them to persist after the job ends. Always copy to `/scratch` or `/project` in a trap or at job end.
-- **Memory**: each self-play worker holds a copy of the network weights in CPU memory. With 32 workers and a ~10 MB model, this is negligible.
-- **Scratch purge policy**: `/scratch` files inactive for 60 days may be deleted. Copy important checkpoints to `/project`.

@@ -305,11 +305,37 @@ Script: `experiments/run_sequential_specialist.sh`
 | Map2 retention | eval_map0_best_so_far | Stays at 11-12 | Degrades to 15+ (catastrophic forgetting) |
 | Generalist probe | After phase 20, run with seed=-1 (random maps) | avg < 14 | avg ≥ 15 (same as 10C) |
 
-### Run IDs
+### Results
 
-| Phase | map_seed | ID | Status |
-|-------|----------|----|--------|
-| 1-20 | 100-2000 | pending | — |
+| Phase | seed | start_avg | final_avg | best | epochs | eval_map0 | first ≤12 |
+|-------|------|-----------|-----------|------|--------|-----------|-----------|
+| 1 | 100 | 15.3 | 12.0 | 12 | 16 | 11 | ep6 |
+| 2 | 200 | 16.7 | 13.0 | 11 | 16 | 11 | ep13 |
+| 3 | 300 | 15.9 | 12.0 | 12 | 30 | 14 | ep25 |
+| 4 | 400 | 13.8 | 12.3 | 12 | 16 | 16 | — |
+| 5 | 500 | 16.3 | 11.8 | 11 | 24 | 14 | ep8 |
+| 6 | 600 | 17.1 | 14.0 | 14 | 25 | 13 | — |
+| 7 | 700 | 16.7 | 16.0 | 16 | 16 | 13 | — |
+| 8 | 800 | 14.3 | 12.0 | 12 | 19 | 14 | ep4 |
+| 9 | 900 | 15.7 | 11.7 | 11 | 17 | 14 | ep7 |
+| 10 | 1000 | 18.8 | 14.2 | 13 | 20 | 13 | — |
+| 11 | 1100 | 12.7 | 11.0 | 11 | 22 | 13 | ep4 |
+| 12 | 1200 | 15.6 | 14.0 | 14 | 26 | 12 | — |
+| 13 | 1300 | 15.9 | 13.1 | 13 | 22 | 12 | — |
+| 14 | 1400 | 18.6 | 16.8 | 16 | 16 | 12 | — |
+| 15 | 1500 | 16.6 | 15.0 | 15 | 20 | 12 | — |
+| 16 | 1600 | 15.1 | 11.7 | 11 | 25 | 13 | ep10 |
+| 17 | 1700 | 15.2 | 13.0 | 13 | 16 | 12 | — |
+| 18 | 1800 | 15.9 | 12.1 | 12 | 20 | 12 | — |
+| 19 | 1900 | 14.5 | 14.0 | 14 | 17 | 13 | — |
+| 20 | 2000 | 14.6 | 13.0 | 13 | 18 | 13 | — |
+
+### Analysis
+
+- **Starting cost**: no downward trend over 20 phases (range 12.7–18.8). No evidence of learning-to-learn.
+- **Convergence**: 8/20 phases reached avg ≤ 12. Varies by map difficulty, not by phase number.
+- **Map2 retention**: degraded from 11 (phase 1-2) to 12-13 (phases 12-20). Partial retention, not catastrophic forgetting, but not building a shared representation either.
+- **Conclusion**: sequential specialist training does NOT build transferable features. Each map is solved essentially from scratch. The model forgets previous maps while learning new ones.
 
 Timing: ~1 hour per phase × 20 phases ≈ 20 hours total (sequential).
 
@@ -390,3 +416,42 @@ This lets the network learn to attend to gate partners rather than mixing all qu
 1. **Diagnostics** (zero risk, high information): per-module gradients, feature ablation, pairwise distance correlation
 2. **Feature improvements A-C** (low risk, medium effort): test whether better features improve generalist performance with the existing architecture
 3. **Architecture change D** (medium risk, medium effort): if better features aren't enough, the mixing mechanism itself needs to change
+
+### Architecture validation results (arch_sanity_check.py)
+
+Supervised cost prediction on 50K random 5×5 maps (×8 augmentation = 400K samples), train/test split BEFORE augmentation (no leakage), 300 epochs.
+
+| # | Architecture | Features | Acc | Pearson r |
+|---|-------------|----------|-----|-----------|
+| 1 | MLPMixer | current (flat participation flags) | 0.329 | 0.013 |
+| 2 | MLPMixer | classifier (cross-positional pairs) | 0.379 | 0.464 |
+| 3 | Transformer | current (flat participation flags) | 0.337 | 0.023 |
+| **4** | **Transformer** | **classifier (cross-positional pairs)** | **0.889** | **0.954** |
+| 5 | MLPMixer | pairwise distances | 0.345 | 0.339 |
+| 6 | Transformer | pairwise distances | 0.512 | 0.721 |
+
+**Context**: The original rewards_classifier_mlp.py achieved 77% val accuracy on 3×3 boards (9 cells, 9 qubits) using MLPMixer + cross-positional pair features. At 5×5 scale, the same MLPMixer + same features only reaches 37.9% — the fixed Conv1d mixing in MLPMixer cannot handle the pairwise combinatorics at larger scale.
+
+**Conclusions**:
+
+1. **Both ingredients are necessary.** Transformer alone (r=0.023) and classifier features alone with MLPMixer (r=0.464) are insufficient. Together: r=0.954.
+2. **The feature encoding was the primary bottleneck.** Current env's flat flags (`+1 to all cells for participating qubits`) destroy gate pairing info. The classifier encoded pair structure as cross-positional markers (`feat[cell_of_q1, q2] = 1`).
+3. **Attention over qubits is required at 5×5 scale.** MLPMixer's fixed Conv1d cannot learn conditional pairwise interactions. Self-attention naturally discovers gate partners.
+4. **Pairwise distances are a lossy summary (r=0.721 vs r=0.954).** Providing raw pair structure lets the network learn its own distance-like representations.
+
+**Action**: Restore cross-positional pair encoding in `env.get_features()` and replace MLPMixer with self-attention over qubits in ValueNetwork/PolicyNetwork.
+
+### Changes implemented
+
+**Feature encoding** (`env.py:get_features()`, `network.py:make_features()`):
+- OLD: flat participation flags — `feat[:, q] += 1.0` for each qubit q in a layer (broadcasts to all cells)
+- NEW: cross-positional pair markers — `feat[cell_of_q1, q2] = 1.0` for each gate pair (q1, q2)
+- Implemented via `_board_feat @ _gate_pair_matrix[t]` (matrix multiply for speed in MCTS hot path)
+- Encodes both WHO pairs with whom and WHERE they are spatially
+
+**Architecture** (`network.py: ValueNetwork, PolicyNetwork`):
+- OLD: MLPMixer (fixed Conv1d patch mixing over qubits) — 139K params
+- NEW: TransformerEncoder (self-attention over qubits) — 298K params
+- Stage 1: `proj_in → qubit_emb + TransformerEncoder` (qubits attend to gate partners)
+- Stage 2: `task_proj → TransformerEncoder` (cross-task/cross-layer reasoning)
+- All 41 existing tests pass; FakeNet and real-network smoke tests pass

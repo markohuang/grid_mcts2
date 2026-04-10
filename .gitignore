@@ -36,17 +36,24 @@ Thumbs.db
 
 # Training outputs
 outputs/
+outputs_ir/
 checkpoints/
+
+# Datasets (generated on HPC, large)
+datasets/
+
+# SLURM logs (generated on cluster)
+slurm/logs/
 
 # Claude
 .claude/
 
+# Deprecated / one-off artifacts
 deprecated/
-
 *.log
 *.txt
-
+.codex
 **/wandb
 
-.codex
-outputs_ir/
+# Old analysis scripts and logs (not part of core pipeline)
+exploration.ipynb

@@ -1,0 +1,30 @@
+# Documentation Index
+
+## Start here
+
+- [problem_definition.md](problem_definition.md) — What we're solving: neutral atom reconfiguration to minimize parallel execution cost
+- [pipeline.md](pipeline.md) — Training pipeline: features → network → MCTS → training targets
+- [architecture.md](architecture.md) — File structure, interfaces, hyperparameters, device lifecycle
+
+## Reward modes
+
+- [reward_modes.md](reward_modes.md) — **All 4 active reward modes**: plan_cost, layer_delta, layer_delta+search_bonus, layer_completion. Formulas, code snippets, properties, and results
+- [reward_analysis.md](reward_analysis.md) — Detailed derivations: why Option A telescopes, Q-collapse proof, correction term math
+- [reward_hybrid_designs.md](reward_hybrid_designs.md) — Hybrid reward proposals (layer_delta + plan_cost shaping as potential function)
+
+## Reference
+
+- [alphadev_comparison.md](alphadev_comparison.md) — AlphaDev architecture comparison
+- [iterative_refinement_reference.md](iterative_refinement_reference.md) — Iterative refinement approaches
+- [map_pool.json](map_pool.json) — 5×5 map pool with best known costs
+- [narval_hpc_migration.md](narval_hpc_migration.md) — HPC deployment (Narval cluster)
+
+## Experiments
+
+See [experiments/README.md](../experiments/README.md) for the full round-by-round index.
+
+Key rounds:
+- [R07](../experiments/07_generalist_and_reward_modes.md) — Reward mode shootout (plan_cost vs layer_delta vs layer_completion)
+- [R08](../experiments/08_reward_signal_error_modes.md) — layer_delta + search bonus discovery
+- [R10](../experiments/10_convergence_and_scaling.md) — Convergence studies, sequential specialist, architecture analysis
+- [R11](../experiments/11_architecture_validation.md) — **Current**: Transformer + cross-positional features validation

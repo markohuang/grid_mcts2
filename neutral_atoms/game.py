@@ -126,3 +126,53 @@ class Game:
             self.child_visits[state_index],
             bootstrap_discount,
         )
+
+    def to_dict(self):
+        return {
+            'tasks': self.tasks,
+            'initial_positions': list(self.initial_positions),
+            'history': self.history,
+            'rewards': self.rewards,
+            'child_visits': self.child_visits,
+            'root_values': self.root_values,
+            'latency_reward': self.latency_reward,
+            'action_space_size': self.action_space_size,
+            'discount': self.discount,
+            'policy_target_temperature': self.policy_target_temperature,
+            'last_info': self.last_info,
+            'done': self.done,
+            # MCTS diagnostics — useful for evaluating search quality
+            'mcts_depths': self.mcts_depths,
+            'mcts_reward_fracs': self.mcts_reward_fracs,
+        }
+
+    @classmethod
+    def from_dict(cls, d, env_config):
+        game = object.__new__(cls)
+        game.tasks = d['tasks']
+        game.initial_positions = [tuple(p) for p in d['initial_positions']]
+        game.env_config = env_config
+        game.environment = NeutralAtomsEnv(game.tasks, game.initial_positions, env_config)
+        game.environment.reset()
+        for action in d['history']:
+            game.environment.step(action)
+        game.history = d['history']
+        game.rewards = d['rewards']
+        game.child_visits = d['child_visits']
+        game.root_values = d['root_values']
+        game.latency_reward = d['latency_reward']
+        game.action_space_size = d['action_space_size']
+        game.discount = d['discount']
+        game.policy_target_temperature = d['policy_target_temperature']
+        game.last_info = d['last_info']
+        game.done = d['done']
+        game.observation_cache = []
+        game.current_qubit_cache = []
+        game.mcts_depths = d.get('mcts_depths', [])
+        game.mcts_reward_fracs = d.get('mcts_reward_fracs', [])
+        game.mcts_reward_sum_means = []
+        game.mcts_reward_sum_stds = []
+        game.mcts_reward_abs_sum_means = []
+        game.mcts_boundary_reach_fracs = []
+        game.mcts_sign_changes_means = []
+        return game

@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Onboarding (read in order)
 
 1. **This file** — setup, commands, coding style, architecture overview
-2. **`docs/pipeline.md`** — training pipeline with diagrams (feature construction, network architecture, training targets)
-3. **`docs/architecture.md`** — detailed file structure, key interfaces, hyperparameter table, device lifecycle
-4. **`experiments/README.md`** → individual round docs — what's been tested, results, known bottlenecks, next steps
+2. **`docs/README.md`** — documentation index (links to all docs below)
+3. **`docs/pipeline.md`** — training pipeline with diagrams (feature construction, network architecture, training targets)
+4. **`docs/architecture.md`** — detailed file structure, key interfaces, hyperparameter table, device lifecycle
+5. **`docs/reward_modes.md`** — all 4 reward modes with formulas, code snippets, and results
+6. **`experiments/README.md`** → individual round docs — what's been tested, results, known bottlenecks, next steps
 
 ### Current status
 

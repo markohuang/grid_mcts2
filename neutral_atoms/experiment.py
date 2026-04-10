@@ -319,6 +319,10 @@ def append_to_registry(output_dir, run_id, config, metrics):
     }
     entry.update(_git_metadata())
     entry.update({k: v for k, v in metrics.items() if k != 'best_game'})
+    import fcntl
     registry_path = os.path.join(output_dir, 'run_registry.jsonl')
     with open(registry_path, 'a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(entry) + '\n')
+        f.flush()
+        fcntl.flock(f, fcntl.LOCK_UN)

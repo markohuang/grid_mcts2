@@ -119,10 +119,15 @@ Episode ends when all gate layers have been auto-executed (`tasks_done == num_ta
 
 ```
 main.py                    # Entry point: config loading, epoch loop, early stopping
+selfplay_worker.py         # HPC entry point: distributed CPU self-play, saves dataset to shared dir
+analyze.py                 # Per-study and per-run analysis from metrics.jsonl / run_registry.jsonl
+slurm/
+└── selfplay.sh            # SLURM job array script for multi-node self-play on Narval
 neutral_atoms/
 ├── __init__.py            # Package exports
 ├── types.py               # Type aliases (Board, AtomPositions, Move, etc.), StepResult, constants
-├── config.py              # ml_collections ConfigDict (get_config, set_derived_config), MAPS
+├── config.py              # ml_collections ConfigDict (get_config, set_derived_config), MAPS,
+│                          #   map_class() → "5x5_12q_04g_03l", map_id() → md5 hash
 ├── board.py               # Board creation, move application, per-qubit legal actions
 ├── moves.py               # Vectorized parallel grouping, canonicalization, graph coloring
 ├── fast_moves.py          # Optimized parallel grouping used at runtime (count_groups_fast, group_entropy_fast)
@@ -132,11 +137,16 @@ neutral_atoms/
 ├── map_generator.py       # Random board + task generation for larger maps (Maps 3+)
 ├── augmentation.py        # Board symmetry augmentations for training data
 ├── game.py                # Game: episode wrapper with history, targets, search stats
+│                          #   to_dict() / from_dict() for compact serialization (~4KB/game)
 ├── mcts.py                # MCTS: tree search, UCB, expansion, backprop, temperature decay
 ├── network.py             # MLPMixer value/policy nets, EMA, FakeNet, make_features
+├── data.py                # Dataset I/O: atomic_save_batch, scan_dataset, dataset_stats
 ├── trainer.py             # AlphaAtomsTrainer: self-play, replay buffer, Fabric training
+│                          #   game_to_tensordict() for feature reconstruction from raw games
+│                          #   load_dataset_into_buffer() for training from HPC-generated datasets
 ├── experiment.py          # Run tracking: directories, solution export, cost metrics, registry
-└── test_env.py            # Tests for parallel grouping + layer-level MDP
+│                          #   (uses fcntl.flock for concurrent-safe registry writes)
+└── test_env.py            # Tests for parallel grouping + layer-level MDP + serialization
 ```
 
 ## Key Interfaces
@@ -148,6 +158,14 @@ trainer = AlphaAtomsTrainer(network, config, tasks, initial_positions)
 games = trainer.run_selfplay()   # returns list[Game], saves to replay buffer
 result = trainer.fit()           # returns {'loss': float} or None (FakeNet/buffer too small)
 trainer.save_checkpoint(path)    # saves via Fabric (model + optimizer state)
+
+# Standalone functions (used by both local training and HPC dataset loading):
+td = game_to_tensordict(game, td_steps)   # Game → TensorDict for replay buffer
+n = load_dataset_into_buffer(             # Load HPC-generated dataset into buffer
+    dataset_dir, env_config, td_steps, buffer,
+    filter_class="5x5_12q_04g_03l",       # optional: filter by map class
+    filter_map_id="a3f7c2e1",             # optional: filter by specific map
+)
 ```
 
 ### experiment.py
@@ -156,7 +174,7 @@ trainer.save_checkpoint(path)    # saves via Fabric (model + optimizer state)
 run_id, run_dir = create_run_dir(config)          # creates outputs/<run_id>/, saves config.json
 cost = compute_solution_cost(game)                 # replays game, sums reconfig + gate groups per layer
 solution = save_solution(game, path)               # writes atom-viz compatible JSON
-metrics = selfplay_metrics(games, num_tasks)        # {best_cost, avg_cost, completion_rate, best_game}
+metrics = selfplay_metrics(games)                  # {best_cost, avg_cost, completion_rate, best_game}
 ```
 
 ### game.py: Game
@@ -166,6 +184,27 @@ game = Game(config, tasks, initial_positions)  # takes full config
 game.apply(action)                             # steps env, records reward/history
 obs = game.make_observation(state_index)       # replays to reconstruct observation at step i
 target = game.make_target(i, td_steps)         # TD return + MCTS policy target
+
+d = game.to_dict()                             # compact serialization (~4KB, no features)
+game = Game.from_dict(d, env_config)           # reconstruct from dict (replays actions through env)
+```
+
+### config.py: Map taxonomy
+
+```python
+mc = map_class(map_data)   # → "5x5_12q_04g_03l" (board, qubits, gates/layer, layers)
+mid = map_id(map_data)     # → "a3f7c2e1" (md5 of canonical atom_map + tasks)
+```
+
+### data.py: Dataset I/O (HPC pipeline)
+
+```python
+save_map_spec(dataset_dir, map_data)               # idempotent: saves maps/<map_id>.json
+save_game_batch(dataset_dir, game_dicts, map_data,  # atomic write to games/<class>/<id>/batch_*.pt
+                node_id, batch_seq)
+batch_files = scan_dataset(dataset_dir,             # list all .pt files, with optional filters
+                           filter_class="5x5_12q_04g_03l")
+stats = dataset_stats(dataset_dir)                  # print + return game/step/class counts
 ```
 
 ## Key Hyperparameters

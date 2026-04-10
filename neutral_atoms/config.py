@@ -159,3 +159,21 @@ def set_derived_config(config):
 def get_map_data(config):
     m = _resolve_map(MAPS[config.map_num])
     return m
+
+
+def map_class(map_data):
+    h, w = map_data['board_dim']
+    q = map_data['num_qubits']
+    tasks = map_data['tasks']
+    g = max(len(layer) for layer in tasks)
+    l = len(tasks)
+    return f'{h}x{w}_{q:02d}q_{g:02d}g_{l:02d}l'
+
+
+def map_id(map_data):
+    import hashlib, json
+    canonical = json.dumps({
+        'atom_map': sorted(map_data['atom_map']),
+        'tasks': [sorted([sorted(pair) for pair in layer]) for layer in map_data['tasks']],
+    }, sort_keys=True)
+    return hashlib.md5(canonical.encode()).hexdigest()[:8]

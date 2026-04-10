@@ -26,6 +26,7 @@ Tracking support:
 | [08](08_reward_signal_error_modes.md) | 2026-03-31 | Reward-signal error modes before generalist scale-up | Pure `layer_delta` fixed the local signal story but did not beat `plan_cost` on matched generalist seed42; missing long-horizon search structure became the leading diagnosis |
 | [09](09_search_bonus_generalist_5x5.md) | 2026-04-02 | 5x5 generalist follow-up with MCTS-only search bonus | Planned: test whether `layer_delta` plus `plan_cost` search guidance can keep the cleaner value target and recover generalist search depth |
 | [10](10_convergence_and_scaling.md) | 2026-04-02 | Convergence studies and scaling indicators | Long runs (500ep), more games/ep (50-100), NN capacity test (139K vs 418K), fixed + generalist with `layer_delta + search_bonus=2.0` |
+| [11](11_architecture_validation.md) | 2026-04-09 | Architecture validation (Transformer + cross-positional features) | Benchmark new arch against R10 results on 3 reward modes; test if generalist plateau breaks |
 
 ## Architecture change: Layer-Level MDP
 
