@@ -223,7 +223,10 @@ def _softmax_sample(visit_counts, temperature, action_space_size):
     def softmax_stable(x):
         return np.exp(x - np.max(x)) / np.exp(x - np.max(x)).sum()
     actions_prob = np.full(action_space_size, -np.inf)
+    if temperature == 0.0:
+        best = max(visit_counts, key=lambda x: x[0])[1]
+        return best
     for count, action_idx in visit_counts:
-        actions_prob[action_idx] = count
-    actions_prob = softmax_stable(actions_prob / temperature)
+        actions_prob[action_idx] = math.log(count + 1e-8) / temperature
+    actions_prob = softmax_stable(actions_prob)
     return np.random.choice(action_space_size, p=actions_prob)
