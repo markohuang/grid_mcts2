@@ -44,7 +44,6 @@ def load_dataset_into_buffer(dataset_dir, env_config, td_steps, buffer,
     loaded = 0
     for gd in game_dicts:
         game = Game.from_dict(gd, env_config)
-        game.cache_observation()  # populate observation_cache for make_observation
         td = game_to_tensordict(game, td_steps)
         buffer.extend(td)
         loaded += 1

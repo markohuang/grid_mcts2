@@ -144,6 +144,11 @@ class Game:
             # MCTS diagnostics — useful for evaluating search quality
             'mcts_depths': self.mcts_depths,
             'mcts_reward_fracs': self.mcts_reward_fracs,
+            'mcts_reward_sum_means': self.mcts_reward_sum_means,
+            'mcts_reward_sum_stds': self.mcts_reward_sum_stds,
+            'mcts_reward_abs_sum_means': self.mcts_reward_abs_sum_means,
+            'mcts_boundary_reach_fracs': self.mcts_boundary_reach_fracs,
+            'mcts_sign_changes_means': self.mcts_sign_changes_means,
         }
 
     @classmethod
@@ -154,8 +159,12 @@ class Game:
         game.env_config = env_config
         game.environment = NeutralAtomsEnv(game.tasks, game.initial_positions, env_config)
         game.environment.reset()
+        game.observation_cache = []
+        game.current_qubit_cache = []
         for action in d['history']:
+            game.cache_observation()
             game.environment.step(action)
+        game.cache_observation()
         game.history = d['history']
         game.rewards = d['rewards']
         game.child_visits = d['child_visits']
@@ -166,13 +175,11 @@ class Game:
         game.policy_target_temperature = d['policy_target_temperature']
         game.last_info = d['last_info']
         game.done = d['done']
-        game.observation_cache = []
-        game.current_qubit_cache = []
         game.mcts_depths = d.get('mcts_depths', [])
         game.mcts_reward_fracs = d.get('mcts_reward_fracs', [])
-        game.mcts_reward_sum_means = []
-        game.mcts_reward_sum_stds = []
-        game.mcts_reward_abs_sum_means = []
-        game.mcts_boundary_reach_fracs = []
-        game.mcts_sign_changes_means = []
+        game.mcts_reward_sum_means = d.get('mcts_reward_sum_means', [])
+        game.mcts_reward_sum_stds = d.get('mcts_reward_sum_stds', [])
+        game.mcts_reward_abs_sum_means = d.get('mcts_reward_abs_sum_means', [])
+        game.mcts_boundary_reach_fracs = d.get('mcts_boundary_reach_fracs', [])
+        game.mcts_sign_changes_means = d.get('mcts_sign_changes_means', [])
         return game

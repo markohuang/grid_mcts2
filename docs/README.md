@@ -5,6 +5,7 @@
 - [problem_definition.md](problem_definition.md) — What we're solving: neutral atom reconfiguration to minimize parallel execution cost
 - [pipeline.md](pipeline.md) — Training pipeline: features → network → MCTS → training targets
 - [architecture.md](architecture.md) — File structure, interfaces, hyperparameters, device lifecycle
+- [mcts_selfplay_diagnostics.md](mcts_selfplay_diagnostics.md) — Critical read of the MCTS/self-play pipeline, hyperparameter health checklist, and logging plan for actor-critic dataset scale-up
 
 ## Reward modes
 
