@@ -50,7 +50,7 @@ def build_run_manifest(run_id, config):
         'random_board': config.random_board,
         'use_fake': config.use_fake,
         'num_simulations': config.mcts.num_simulations,
-        'plan_cost_search_bonus_weight': config.mcts.plan_cost_search_bonus_weight,
+        'prior_mix_weight': config.mcts.prior_mix_weight,
         'seed': config.training.seed,
     }
     manifest.update(_git_metadata())
@@ -296,7 +296,7 @@ def append_to_registry(output_dir, run_id, config, metrics):
         'random_board': config.random_board,
         'reward_mode': config.env.reward_mode,
         'num_simulations': config.mcts.num_simulations,
-        'plan_cost_search_bonus_weight': config.mcts.plan_cost_search_bonus_weight,
+        'prior_mix_weight': config.mcts.prior_mix_weight,
         'root_dirichlet_alpha': config.mcts.root_dirichlet_alpha,
         'root_exploration_fraction': config.mcts.root_exploration_fraction,
         'temperature_init': config.mcts.temperature_init,

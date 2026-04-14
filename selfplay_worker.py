@@ -92,7 +92,7 @@ def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path):
     gd['num_simulations'] = config.mcts.num_simulations
     gd['weight_gen'] = os.path.basename(weights_path) if weights_path else 'init'
     gd['reward_mode'] = config.env.reward_mode
-    gd['search_bonus_weight'] = config.mcts.plan_cost_search_bonus_weight
+    gd['prior_mix_weight'] = config.mcts.prior_mix_weight
     gd['metrics'] = _game_metrics(game, game_time)
     return gd
 

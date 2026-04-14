@@ -73,7 +73,13 @@ def get_config():
     c.mcts.temperature_init = 2.0
     c.mcts.temperature_final = 0.25
     c.mcts.temperature_decay_steps = 1000
-    c.mcts.plan_cost_search_bonus_weight = 0.0  # extra UCB bonus from normalized plan_cost delta
+    # Plan-cost heuristic mixed into MCTS prior. When > 0, _expand_node probes each legal
+    # action one step on a cloned env and folds β · plan_cost_delta / cost_ub into the
+    # log-prior before softmax. The heuristic then rides the usual pb_c · √(ΣN)/(1+N)
+    # envelope and distills into π_θ via visit counts. Only valid with reward_mode =
+    # 'layer_delta' (plan_cost mode already puts the same delta into the reward/value
+    # target; stacking both would double-count). Auto-enables env.track_plan_delta.
+    c.mcts.prior_mix_weight = 0.0
 
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50

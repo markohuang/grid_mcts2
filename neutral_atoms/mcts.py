@@ -30,7 +30,6 @@ class Node:
         self.value_sum = 0
         self.children = {}
         self.reward = 0
-        self.search_bonus = 0.0
 
     def expanded(self):
         return bool(self.children)
@@ -68,7 +67,8 @@ def play_game(game: Game, config, network: Network,
         current_observation = game.make_observation(-1)
         with torch.no_grad():
             network_output = network.inference(current_observation, aslist=True)
-        _expand_node(root, game.legal_actions(), network_output, reward=0)
+        _expand_node(root, game.legal_actions(), network_output, reward=0,
+                 sim_env=game.environment, config=config)
         _backpropagate(
             [root], network_output.value,
             config.discount, min_max_stats,
@@ -96,7 +96,6 @@ def run_mcts(config, root, history, network, min_max_stats, env):
     total_abs_reward_sum = 0.0
     total_boundary_sims = 0
     total_sign_changes = 0
-    use_plan_bonus = getattr(config, 'plan_cost_search_bonus_weight', 0.0) > 0
     for _ in range(config.num_simulations):
         node = root
         search_path = [node]
@@ -111,8 +110,6 @@ def run_mcts(config, root, history, network, min_max_stats, env):
             layer_before = sim_env.tasks_done
             action, node = _select_child(config, node, min_max_stats)
             result = sim_env.step(action, skip_obs=True)
-            if use_plan_bonus:
-                node.search_bonus = result.info.get('plan_cost_delta', 0.0) / max(sim_env.cost_ub, 1)
             search_path.append(node)
             sim_reward_sum += result.reward
             sim_abs_reward_sum += abs(result.reward)
@@ -140,7 +137,8 @@ def run_mcts(config, root, history, network, min_max_stats, env):
         }
         with torch.no_grad():
             network_output = network.inference(obs_features, aslist=True)
-        _expand_node(node, sim_env.legal_actions(), network_output, result.reward)
+        _expand_node(node, sim_env.legal_actions(), network_output, result.reward,
+                     sim_env=sim_env, config=config)
         _backpropagate(
             search_path, network_output.value,
             config.discount, min_max_stats,
@@ -191,16 +189,30 @@ def _ucb_score(config, parent, child, min_max_stats):
         )
     else:
         value_score = 0
-    search_bonus = getattr(config, 'plan_cost_search_bonus_weight', 0.0) * child.search_bonus
-    return prior_score + value_score + search_bonus
+    return prior_score + value_score
 
 
-def _expand_node(node, actions, network_output, reward):
+def _expand_node(node, actions, network_output, reward, sim_env=None, config=None):
     node.reward = reward
-    policy = {a: math.exp(network_output.policy_logits[a]) for a in actions}
-    policy_sum = sum(policy.values())
-    for action, p in policy.items():
-        node.children[action] = Node(p / policy_sum)
+    if not actions:
+        return
+    logits = [network_output.policy_logits[a] for a in actions]
+    # Prior mixture: add β · plan_cost_delta / cost_ub to each action's log-prior via
+    # one-step lookahead on a cloned env. Pure heuristic injection — a learned policy
+    # gets warm-started toward cross-layer plan-cost-descending moves, then distills
+    # the mixture into π_θ through visit counts.
+    if config is not None and config.prior_mix_weight > 0 and sim_env is not None:
+        beta = config.prior_mix_weight
+        cub = max(sim_env.cost_ub, 1)
+        for i, a in enumerate(actions):
+            probe = sim_env.clone()
+            info = probe.step(a, skip_obs=True).info
+            logits[i] = logits[i] + beta * (info['plan_cost_delta'] / cub)
+    m = max(logits)
+    exps = [math.exp(l - m) for l in logits]
+    Z = sum(exps)
+    for action, e in zip(actions, exps):
+        node.children[action] = Node(e / Z)
 
 
 def _backpropagate(search_path, value, discount, min_max_stats):

@@ -46,7 +46,10 @@ def format_selfplay_summary(sp_metrics):
 def main(_):
     config = _CONFIG.value
     set_derived_config(config)
-    if getattr(config.mcts, 'plan_cost_search_bonus_weight', 0.0) > 0:
+    if config.mcts.prior_mix_weight > 0:
+        assert config.env.reward_mode == 'layer_delta', \
+            "prior_mix_weight > 0 is only valid with reward_mode='layer_delta' " \
+            "(plan_cost mode already puts plan_cost_delta into the reward)."
         with config.env.unlocked():
             config.env.track_plan_delta = True
     map_data = get_map_data(config)
