@@ -90,6 +90,7 @@ def play_game(game: Game, config, network: Network,
 
 
 def run_mcts(config, root, history, network, min_max_stats, env):
+    assert config.num_simulations > 0, "num_simulations must be > 0"
     total_depth = 0
     total_nonzero_reward_sims = 0
     total_reward_sum = 0.0
@@ -132,16 +133,25 @@ def run_mcts(config, root, history, network, min_max_stats, env):
         if sim_boundary_reached:
             total_boundary_sims += 1
 
-        obs_features = {
-            'features': sim_env.get_features(),
-            'current_qubit': sim_env.current_qubit,
-        }
-        with torch.no_grad():
-            network_output = network.inference(obs_features, aslist=True)
-        _expand_node(node, sim_env.legal_actions(), network_output, result.reward,
+        legal = sim_env.legal_actions()
+        if legal:
+            obs_features = {
+                'features': sim_env.get_features(),
+                'current_qubit': sim_env.current_qubit,
+            }
+            with torch.no_grad():
+                network_output = network.inference(obs_features, aslist=True)
+            leaf_value = network_output.value
+        else:
+            # Terminal leaf: bootstrap with 0 instead of feeding an OOD terminal obs
+            # to the network. _expand_node early-returns on empty actions, so the
+            # node stays childless; subsequent sims reaching here re-bootstrap with 0.
+            network_output = None
+            leaf_value = 0.0
+        _expand_node(node, legal, network_output, result.reward,
                      sim_env=sim_env, config=config)
         _backpropagate(
-            search_path, network_output.value,
+            search_path, leaf_value,
             config.discount, min_max_stats,
         )
     num_sims = config.num_simulations
@@ -158,6 +168,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
 
 def _select_action(training_steps, node, config, action_space_size,
                    deterministic=False, temperature_override=None):
+    assert node.children, "_select_action called on node with no children"
     visit_counts = [
         (child.visit_count, action)
         for action, child in node.children.items()
@@ -203,6 +214,9 @@ def _expand_node(node, actions, network_output, reward, sim_env=None, config=Non
     # gets warm-started toward cross-layer plan-cost-descending moves, then distills
     # the mixture into π_θ through visit counts.
     if config is not None and config.prior_mix_weight > 0 and sim_env is not None:
+        assert sim_env.track_plan_delta or sim_env.reward_mode in ('plan_cost', 'plan_cost_unbiased'), \
+            "prior_mix_weight > 0 requires env.track_plan_delta=True or a plan_cost reward_mode; " \
+            "otherwise plan_cost_delta is silently 0 and the mixture is a no-op"
         beta = config.prior_mix_weight
         cub = max(sim_env.cost_ub, 1)
         for i, a in enumerate(actions):
