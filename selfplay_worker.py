@@ -36,7 +36,7 @@ from neutral_atoms.experiment import compute_solution_cost
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions,
-                      network_config_dict, use_fake):
+                      network_config_dict, use_fake, training_steps):
     torch.set_num_threads(1)
     import ml_collections
     config = ml_collections.ConfigDict(config_dict)
@@ -47,7 +47,7 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions,
     net.eval()
     t0 = time.time()
     game = Game(config, tasks, initial_positions)
-    game = play_game(game, config.mcts, net)
+    game = play_game(game, config.mcts, net, training_steps=training_steps)
     game_time = time.time() - t0
     return game, game_time
 
@@ -72,6 +72,12 @@ def _game_metrics(game, game_time):
             avg_policy_entropy = sum(entropies) / len(entropies)
     avg_root_value = sum(game.root_values) / len(game.root_values) if game.root_values else 0.0
     avg_mcts_depth = sum(game.mcts_depths) / len(game.mcts_depths) if game.mcts_depths else 0.0
+    _mean = lambda xs: sum(xs) / len(xs) if xs else 0.0
+    avg_mcts_reward_std = _mean(game.mcts_reward_sum_stds)
+    avg_mcts_reward_abs = _mean(game.mcts_reward_abs_sum_means)
+    avg_mcts_boundary_frac = _mean(game.mcts_boundary_reach_fracs)
+    avg_mcts_sign_changes = _mean(game.mcts_sign_changes_means)
+    avg_mcts_reward_frac = _mean(game.mcts_reward_fracs)
     return {
         'steps': total_steps,
         'num_moves': num_moves,
@@ -80,17 +86,23 @@ def _game_metrics(game, game_time):
         'avg_policy_entropy': round(avg_policy_entropy, 3),
         'avg_root_value': round(avg_root_value, 3),
         'avg_mcts_depth': round(avg_mcts_depth, 1),
+        'avg_mcts_reward_std': round(avg_mcts_reward_std, 4),
+        'avg_mcts_reward_abs': round(avg_mcts_reward_abs, 4),
+        'avg_mcts_boundary_frac': round(avg_mcts_boundary_frac, 3),
+        'avg_mcts_sign_changes': round(avg_mcts_sign_changes, 3),
+        'avg_mcts_reward_frac': round(avg_mcts_reward_frac, 3),
         'game_time_s': round(game_time, 2),
         'tasks_done': game.last_info.get('tasks_done', 0),
     }
 
 
-def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path):
+def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path, training_steps):
     gd['map_id'] = map_id(map_data)
     gd['map_class'] = map_class(map_data)
     gd['cost'] = compute_solution_cost(game)
     gd['num_simulations'] = config.mcts.num_simulations
-    gd['weight_gen'] = os.path.basename(weights_path) if weights_path else 'init'
+    gd['weight_gen'] = training_steps
+    gd['weight_file'] = os.path.basename(weights_path) if weights_path else 'init'
     gd['reward_mode'] = config.env.reward_mode
     gd['prior_mix_weight'] = config.mcts.prior_mix_weight
     gd['metrics'] = _game_metrics(game, game_time)
@@ -114,18 +126,26 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
 
     network = Network(config.network, use_fake=config.use_fake)
     state_dict = None
+    training_steps = 0
     if weights_path and os.path.exists(weights_path):
         ckpt = torch.load(weights_path, map_location='cpu', weights_only=False)
+        if 'training_steps' not in ckpt:
+            raise KeyError(
+                f"checkpoint {weights_path} has no 'training_steps' field — "
+                "re-save with updated trainer (commit after weight_gen fix) or "
+                "the temperature schedule will silently snap to step 0"
+            )
+        training_steps = int(ckpt['training_steps'])
         if 'model' in ckpt:
             network.load_state_dict(ckpt['model'])
             state_dict = {k: v.cpu() for k, v in ckpt['model'].items()}
         else:
             network.load_state_dict(ckpt)
             state_dict = {k: v.cpu() for k, v in ckpt.items()}
-        print(f"Loaded weights from {weights_path}")
+        print(f"Loaded weights from {weights_path} (training_steps={training_steps})")
     elif not config.use_fake:
         state_dict = {k: v.cpu() for k, v in network.state_dict().items()}
-        print("Using randomly initialized network")
+        print("Using randomly initialized network (training_steps=0)")
 
     config_dict = config.to_dict()
     network_config_dict = config.network.to_dict()
@@ -148,7 +168,8 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
         for _ in range(chunk):
             futures.append(pool.submit(
                 _play_single_game, state_dict, config_dict, tasks,
-                initial_positions, network_config_dict, config.use_fake
+                initial_positions, network_config_dict, config.use_fake,
+                training_steps,
             ))
 
         game_dicts = []
@@ -156,7 +177,8 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
         for future in futures:
             game, game_time = future.result()
             gd = _enrich_game_dict(
-                game.to_dict(), game, game_time, map_data, config, weights_path
+                game.to_dict(), game, game_time, map_data, config, weights_path,
+                training_steps,
             )
             game_dicts.append(gd)
             batch_costs.append(gd['cost'])

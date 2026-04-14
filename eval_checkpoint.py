@@ -53,6 +53,7 @@ def _eval_games(config, network, tasks, initial_positions):
         game = Game(config, tasks, initial_positions)
         game = play_game(
             game, config.mcts, network,
+            training_steps=network.training_steps(),
             add_exploration_noise=not _DETERMINISTIC.value,
             deterministic=_DETERMINISTIC.value,
         )

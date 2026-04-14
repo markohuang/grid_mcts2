@@ -58,6 +58,7 @@ class MinMaxStats:
 # ---- MCTS Algorithm ----
 
 def play_game(game: Game, config, network: Network,
+              *, training_steps: int,
               add_exploration_noise: bool = True,
               deterministic: bool = False,
               temperature_override: float | None = None) -> Game:
@@ -78,7 +79,7 @@ def play_game(game: Game, config, network: Network,
 
         run_mcts(config, root, game.history, network, min_max_stats, game.environment)
         action = _select_action(
-            network.training_steps(), root, config, game.action_space_size,
+            training_steps, root, config, game.action_space_size,
             deterministic=deterministic, temperature_override=temperature_override,
         )
         game.cache_observation()

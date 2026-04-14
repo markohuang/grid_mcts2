@@ -50,7 +50,7 @@ def load_dataset_into_buffer(dataset_dir, env_config, td_steps, buffer,
     return loaded
 
 
-def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake):
+def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake, training_steps):
     torch.set_num_threads(1)
     import ml_collections
     config = ml_collections.ConfigDict(config_dict)
@@ -60,7 +60,7 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions, network
         net.load_state_dict(state_dict)
     net.eval()
     game = Game(config, tasks, initial_positions)
-    game = play_game(game, config.mcts, net)
+    game = play_game(game, config.mcts, net, training_steps=training_steps)
     return game
 
 
@@ -199,7 +199,8 @@ class AlphaAtomsTrainer:
         for idx in range(num_games):
             tasks, ip = self._get_game_instance()
             game = Game(self.config, tasks, ip)
-            game = play_game(game, self.config.mcts, self.network)
+            game = play_game(game, self.config.mcts, self.network,
+                             training_steps=self.network.training_steps())
             game_cost = compute_solution_cost(game)
             self.save_game(game, game_cost)
             games.append(game)
@@ -215,6 +216,7 @@ class AlphaAtomsTrainer:
         config_dict = self.config.to_dict()
         network_config_dict = self.config.network.to_dict()
         use_fake = self.network.use_fake
+        training_steps = self.network.training_steps()
 
         pool = self._get_pool(num_parallel)
         futures = []
@@ -222,7 +224,7 @@ class AlphaAtomsTrainer:
             tasks, ip = self._get_game_instance()
             futures.append(
                 pool.submit(_play_single_game, state_dict, config_dict, tasks,
-                            ip, network_config_dict, use_fake)
+                            ip, network_config_dict, use_fake, training_steps)
             )
 
         from .experiment import compute_solution_cost
@@ -306,6 +308,7 @@ class AlphaAtomsTrainer:
             'run_id': run_id,
             'parent_run': self.config.experiment.parent_run,
             'epoch': epoch,
+            'training_steps': self.network.training_steps(),
             'git_sha': git['git_commit'],
             'git_dirty': git['git_dirty'],
             'config_hash': config_hash,

@@ -350,7 +350,7 @@ class TestGameSerialization:
         from .network import Network
         net = Network(config.network, use_fake=True)
         game = Game(config, m['tasks'], initial_positions)
-        game = play_game(game, config.mcts, net)
+        game = play_game(game, config.mcts, net, training_steps=0)
         game.cache_observation()
         d = game.to_dict()
         restored = Game.from_dict(d, config.env)
@@ -385,7 +385,7 @@ class TestGameSerialization:
         from .network import Network
         net = Network(config.network, use_fake=True)
         game = Game(config, m['tasks'], initial_positions)
-        game = play_game(game, config.mcts, net)
+        game = play_game(game, config.mcts, net, training_steps=0)
         game.cache_observation()
         d = game.to_dict()
         import io, torch
