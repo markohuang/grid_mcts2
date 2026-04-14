@@ -23,6 +23,7 @@ INDEX_SCHEMA = pa.schema([
     ('mcts_depth', pa.float32()),
     ('mcts_reward_std', pa.float32()),
     ('mcts_reward_abs', pa.float32()),
+    ('mcts_reward_sum_mean', pa.float32()),
     ('mcts_boundary_frac', pa.float32()),
     ('mcts_sign_changes', pa.float32()),
     ('mcts_reward_frac', pa.float32()),
@@ -30,6 +31,11 @@ INDEX_SCHEMA = pa.schema([
     ('num_simulations', pa.int32()),
     ('weight_gen', pa.int64()),
     ('weight_file', pa.string()),
+    ('weight_run_id', pa.string()),
+    ('weight_git_sha', pa.string()),
+    ('selfplay_git_sha', pa.string()),
+    ('slurm_job_id', pa.string()),
+    ('slurm_array_task_id', pa.string()),
     ('reward_mode', pa.string()),
     ('prior_mix_weight', pa.float32()),
     ('batch_file', pa.string()),
@@ -123,6 +129,8 @@ def _index_rows_from_batch(game_dicts, batch_file_rel, node_id, batch_seq):
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
     for idx, g in enumerate(game_dicts):
         m = g.get('metrics', {})
+        wl = g.get('weight_lineage', {})
+        sc = g.get('selfplay_context', {})
         rows.append({
             'game_id': f'{node_id}_{batch_seq:06d}_{idx:04d}',
             'map_class': g.get('map_class', ''),
@@ -137,6 +145,7 @@ def _index_rows_from_batch(game_dicts, batch_file_rel, node_id, batch_seq):
             'mcts_depth': m.get('avg_mcts_depth', 0.0),
             'mcts_reward_std': m.get('avg_mcts_reward_std', 0.0),
             'mcts_reward_abs': m.get('avg_mcts_reward_abs', 0.0),
+            'mcts_reward_sum_mean': m.get('avg_mcts_reward_sum_mean', 0.0),
             'mcts_boundary_frac': m.get('avg_mcts_boundary_frac', 0.0),
             'mcts_sign_changes': m.get('avg_mcts_sign_changes', 0.0),
             'mcts_reward_frac': m.get('avg_mcts_reward_frac', 0.0),
@@ -144,6 +153,11 @@ def _index_rows_from_batch(game_dicts, batch_file_rel, node_id, batch_seq):
             'num_simulations': g.get('num_simulations', 0),
             'weight_gen': g['weight_gen'],
             'weight_file': g.get('weight_file', ''),
+            'weight_run_id': wl.get('run_id', '') or '',
+            'weight_git_sha': wl.get('git_sha', '') or '',
+            'selfplay_git_sha': sc.get('git_sha', '') or '',
+            'slurm_job_id': sc.get('slurm_job_id', '') or '',
+            'slurm_array_task_id': sc.get('slurm_array_task_id', '') or '',
             'reward_mode': g.get('reward_mode', ''),
             'prior_mix_weight': g.get('prior_mix_weight', 0.0),
             'batch_file': batch_file_rel,

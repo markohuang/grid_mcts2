@@ -62,12 +62,29 @@ def get_config():
     c.env.track_plan_delta = False  # expose plan_cost delta in step info for diagnostics / MCTS heuristics
 
     c.mcts = ml_collections.ConfigDict()
+    # num_simulations: smoke-test default. HPC preset overrides to 800 (AlphaDev parity).
+    # See config_hpc.py. Override via --config.mcts.num_simulations=<N> on the CLI.
     c.mcts.num_simulations = 50
     c.mcts.discount = 1.0
-    c.mcts.pb_c_base = 19652
-    c.mcts.pb_c_init = 1.25
-    c.mcts.root_dirichlet_alpha = 0.03
-    c.mcts.root_exploration_fraction = 0.25
+    # pb_c = init + log((N_parent + base + 1) / base). At N_parent = base, log term adds
+    # log(2) ~= 0.69 on top of init. The log term grows meaningfully only when N_parent
+    # approaches `base`, and only the root ever gets close (interior nodes have much
+    # smaller parent visit counts).
+    #   AlphaDev / AlphaZero:  base=19652, init=1.25   (dead weight at <2000 sims)
+    #   lc0:                   base=38739, init=1.745  (tuned for 10k-100k tournament sims)
+    #   ours:                  base=500,   init=1.25   (engages at our 800-sim target)
+    # Growth at our setting:
+    #   N_parent=50   -> pb_c = 1.25 + 0.10 = 1.35   (+ 8%, barely perturbs smoke tests)
+    #   N_parent=800  -> pb_c = 1.25 + 0.96 = 2.21   (+77%, real exploration gain)
+    #   N_parent=2000 -> pb_c = 1.25 + 1.61 = 2.86   (+129%, headroom for further scale)
+    c.mcts.pb_c_base = 500
+    c.mcts.pb_c_init = 1.25  # sweep jointly with root_dirichlet_alpha after first HPC wave
+    # root_dirichlet_alpha: AlphaDev=0.03 (271 actions), AlphaZero chess=0.03 (~30 moves),
+    # AlphaZero shogi/Go-9x9=0.15. Our branching factor is 9-15 (empty cells on the board).
+    # 0.03 was too spiky pre-softmax-fix: noise concentrated on 1-2 cells out of 9-15.
+    # 0.3 is a safer post-fix default; sweep 0.1-1.0 after the first HPC self-play wave.
+    c.mcts.root_dirichlet_alpha = 0.3  # TODO: sweep post scale-up
+    c.mcts.root_exploration_fraction = 0.25  # AlphaDev=0.25, AlphaZero=0.25
     c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
     c.mcts.max_moves = 10000
     c.mcts.temperature_init = 2.0
@@ -173,7 +190,7 @@ def map_class(map_data):
     tasks = map_data['tasks']
     g = max(len(layer) for layer in tasks)
     l = len(tasks)
-    return f'{h}x{w}_{q:02d}q_{g:02d}g_{l:02d}l'
+    return f'{h}x{w}_{q}qb_{g}gpl_{l}lyrs'
 
 
 def map_id(map_data):

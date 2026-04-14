@@ -25,14 +25,19 @@ import torch
 import concurrent.futures
 
 from neutral_atoms.config import (
-    get_config, set_derived_config, get_map_data,
+    set_derived_config, get_map_data,
     atom_map_to_positions, map_class, map_id, MAPS,
 )
 from neutral_atoms.network import Network
 from neutral_atoms.game import Game
 from neutral_atoms.mcts import play_game
 from neutral_atoms.data import save_game_batch, save_map_spec, save_manifest, atomic_save, append_index
-from neutral_atoms.experiment import compute_solution_cost
+from neutral_atoms.experiment import compute_solution_cost, _git_metadata
+
+
+# lineage fields we copy from a loaded checkpoint into each game dict
+_CKPT_LINEAGE_FIELDS = ('run_id', 'parent_run', 'epoch', 'training_steps',
+                        'git_sha', 'git_dirty', 'config_hash')
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions,
@@ -74,6 +79,7 @@ def _game_metrics(game, game_time):
     avg_mcts_depth = sum(game.mcts_depths) / len(game.mcts_depths) if game.mcts_depths else 0.0
     _mean = lambda xs: sum(xs) / len(xs) if xs else 0.0
     avg_mcts_reward_std = _mean(game.mcts_reward_sum_stds)
+    avg_mcts_reward_sum_mean = _mean(game.mcts_reward_sum_means)
     avg_mcts_reward_abs = _mean(game.mcts_reward_abs_sum_means)
     avg_mcts_boundary_frac = _mean(game.mcts_boundary_reach_fracs)
     avg_mcts_sign_changes = _mean(game.mcts_sign_changes_means)
@@ -87,6 +93,7 @@ def _game_metrics(game, game_time):
         'avg_root_value': round(avg_root_value, 3),
         'avg_mcts_depth': round(avg_mcts_depth, 1),
         'avg_mcts_reward_std': round(avg_mcts_reward_std, 4),
+        'avg_mcts_reward_sum_mean': round(avg_mcts_reward_sum_mean, 4),
         'avg_mcts_reward_abs': round(avg_mcts_reward_abs, 4),
         'avg_mcts_boundary_frac': round(avg_mcts_boundary_frac, 3),
         'avg_mcts_sign_changes': round(avg_mcts_sign_changes, 3),
@@ -96,13 +103,16 @@ def _game_metrics(game, game_time):
     }
 
 
-def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path, training_steps):
+def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path,
+                      training_steps, weight_lineage, selfplay_context):
     gd['map_id'] = map_id(map_data)
     gd['map_class'] = map_class(map_data)
     gd['cost'] = compute_solution_cost(game)
     gd['num_simulations'] = config.mcts.num_simulations
     gd['weight_gen'] = training_steps
     gd['weight_file'] = os.path.basename(weights_path) if weights_path else 'init'
+    gd['weight_lineage'] = weight_lineage
+    gd['selfplay_context'] = selfplay_context
     gd['reward_mode'] = config.env.reward_mode
     gd['prior_mix_weight'] = config.mcts.prior_mix_weight
     gd['metrics'] = _game_metrics(game, game_time)
@@ -118,7 +128,7 @@ def _save_worker_log(dataset_dir, node_id, log_entry):
 
 
 def run_worker(config, map_data, dataset_dir, num_games, num_workers,
-               batch_size, weights_path, node_id):
+               batch_size, weights_path, node_id, slurm_job_id, slurm_array_task_id):
     tasks = map_data['tasks']
     initial_positions = atom_map_to_positions(map_data['atom_map'],
                                               config.env.board_width)
@@ -127,6 +137,7 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
     network = Network(config.network, use_fake=config.use_fake)
     state_dict = None
     training_steps = 0
+    weight_lineage = {k: '' for k in _CKPT_LINEAGE_FIELDS}
     if weights_path and os.path.exists(weights_path):
         ckpt = torch.load(weights_path, map_location='cpu', weights_only=False)
         if 'training_steps' not in ckpt:
@@ -136,16 +147,35 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
                 "the temperature schedule will silently snap to step 0"
             )
         training_steps = int(ckpt['training_steps'])
+        weight_lineage = {k: ckpt.get(k, '') for k in _CKPT_LINEAGE_FIELDS}
+        weight_lineage['weights_path'] = weights_path
         if 'model' in ckpt:
             network.load_state_dict(ckpt['model'])
             state_dict = {k: v.cpu() for k, v in ckpt['model'].items()}
         else:
             network.load_state_dict(ckpt)
             state_dict = {k: v.cpu() for k, v in ckpt.items()}
-        print(f"Loaded weights from {weights_path} (training_steps={training_steps})")
+        print(f"Loaded weights from {weights_path} (training_steps={training_steps}, "
+              f"run_id={weight_lineage.get('run_id','')}, git_sha={weight_lineage.get('git_sha','')[:8]})")
     elif not config.use_fake:
         state_dict = {k: v.cpu() for k, v in network.state_dict().items()}
+        weight_lineage = {k: '' for k in _CKPT_LINEAGE_FIELDS}
+        weight_lineage['weights_path'] = ''
         print("Using randomly initialized network (training_steps=0)")
+    else:
+        weight_lineage = {k: '' for k in _CKPT_LINEAGE_FIELDS}
+        weight_lineage['weights_path'] = ''
+
+    git = _git_metadata()
+    selfplay_context = {
+        'git_sha': git['git_commit'],
+        'git_dirty': git['git_dirty'],
+        'slurm_job_id': slurm_job_id,
+        'slurm_array_task_id': slurm_array_task_id,
+        'node_id': node_id,
+        'hostname': socket.gethostname(),
+        'started_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
 
     config_dict = config.to_dict()
     network_config_dict = config.network.to_dict()
@@ -178,7 +208,7 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
             game, game_time = future.result()
             gd = _enrich_game_dict(
                 game.to_dict(), game, game_time, map_data, config, weights_path,
-                training_steps,
+                training_steps, weight_lineage, selfplay_context,
             )
             game_dicts.append(gd)
             batch_costs.append(gd['cost'])
@@ -259,12 +289,23 @@ def main():
     parser.add_argument('--weights_path', default='')
     parser.add_argument('--node_id', default='')
     parser.add_argument('--notes', default='')
+    parser.add_argument('--preset', choices=['default', 'hpc'], default='default',
+                        help="default=config.py (smoke-test knobs); "
+                             "hpc=config_hpc.py (800 sims, scale-up defaults)")
+    parser.add_argument('--slurm_job_id', default=os.environ.get('SLURM_JOB_ID', ''))
+    parser.add_argument('--slurm_array_task_id',
+                        default=os.environ.get('SLURM_ARRAY_TASK_ID', ''))
     args, remaining = parser.parse_known_args()
+
+    if args.preset == 'hpc':
+        from neutral_atoms.config_hpc import get_config as _get_config
+    else:
+        from neutral_atoms.config import get_config as _get_config
 
     sys.argv = [sys.argv[0]] + remaining
     from absl import app
     from ml_collections import config_flags
-    _CONFIG = config_flags.DEFINE_config_dict('config', get_config())
+    _CONFIG = config_flags.DEFINE_config_dict('config', _get_config())
 
     def _main(_):
         config = _CONFIG.value
@@ -272,11 +313,12 @@ def main():
         map_data = get_map_data(config)
 
         node_id = args.node_id or f"{socket.gethostname()}_{os.getpid()}"
-        print(f"Self-play worker: node_id={node_id}")
+        print(f"Self-play worker: node_id={node_id} preset={args.preset}")
         print(f"  map_class={map_class(map_data)}, map_id={map_id(map_data)}")
         print(f"  num_games={args.num_games}, num_workers={args.num_workers}, "
               f"sims={config.mcts.num_simulations}, use_fake={config.use_fake}")
         print(f"  dataset_dir={args.dataset_dir}")
+        print(f"  slurm: job_id={args.slurm_job_id}, array_task={args.slurm_array_task_id}")
 
         save_manifest(args.dataset_dir, config.to_dict(), notes=args.notes)
 
@@ -287,6 +329,8 @@ def main():
             batch_size=args.batch_size,
             weights_path=args.weights_path,
             node_id=node_id,
+            slurm_job_id=args.slurm_job_id,
+            slurm_array_task_id=args.slurm_array_task_id,
         )
 
     app.run(_main)
