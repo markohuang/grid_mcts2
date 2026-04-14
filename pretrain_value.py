@@ -172,13 +172,14 @@ def main(_):
 
         if (epoch + 1) % config.experiment.checkpoint_every_n_epochs == 0:
             ckpt_path = os.path.join(run_dir, 'checkpoints', f'epoch_{epoch+1:03d}.ckpt')
-            trainer.save_checkpoint(ckpt_path)
+            trainer.save_checkpoint(ckpt_path, run_id=run_id, epoch=epoch + 1)
 
         if no_improve_count >= config.experiment.early_stopping_patience:
             print(f"\nEarly stopping: no improvement for {no_improve_count} epochs")
             break
 
-    trainer.save_checkpoint(os.path.join(run_dir, 'checkpoints', 'final.ckpt'))
+    trainer.save_checkpoint(os.path.join(run_dir, 'checkpoints', 'final.ckpt'),
+                            run_id=run_id, epoch=epoch + 1)
     if best_game is not None:
         save_solution(best_game, os.path.join(run_dir, 'solutions', 'best.json'))
         log_game_trace(best_game, run_dir, label='best')

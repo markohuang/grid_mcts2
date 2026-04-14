@@ -295,11 +295,28 @@ class AlphaAtomsTrainer:
         model.eval()
         return last_losses
 
-    def save_checkpoint(self, path):
+    def _lineage_metadata(self, run_id=None, epoch=None):
+        import hashlib, json
+        from .experiment import _git_metadata
+        git = _git_metadata()
+        config_hash = hashlib.sha256(
+            json.dumps(self.config.to_dict(), sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+        return {
+            'run_id': run_id,
+            'parent_run': self.config.experiment.parent_run,
+            'epoch': epoch,
+            'git_sha': git['git_commit'],
+            'git_dirty': git['git_dirty'],
+            'config_hash': config_hash,
+        }
+
+    def save_checkpoint(self, path, run_id=None, epoch=None):
         if self.network.use_fake:
             return
+        meta = self._lineage_metadata(run_id=run_id, epoch=epoch)
         if self._fabric is not None:
-            state = {"model": self._model, "optimizer": self._optimizer}
+            state = {"model": self._model, "optimizer": self._optimizer, **meta}
             self._fabric.save(path, state)
         else:
-            torch.save({'model': self.network.state_dict()}, path)
+            torch.save({'model': self.network.state_dict(), **meta}, path)

@@ -182,7 +182,7 @@ def main(_):
 
         if (epoch + 1) % config.experiment.checkpoint_every_n_epochs == 0:
             ckpt_path = os.path.join(run_dir, 'checkpoints', f'epoch_{epoch+1:03d}.ckpt')
-            trainer.save_checkpoint(ckpt_path)
+            trainer.save_checkpoint(ckpt_path, run_id=run_id, epoch=epoch + 1)
             print(f"  checkpoint: epoch_{epoch+1:03d}.ckpt")
 
         # Curriculum expansion: when stalled on newest map, add a new map
@@ -203,7 +203,8 @@ def main(_):
             break
 
     # Save final artifacts
-    trainer.save_checkpoint(os.path.join(run_dir, 'checkpoints', 'final.ckpt'))
+    trainer.save_checkpoint(os.path.join(run_dir, 'checkpoints', 'final.ckpt'),
+                            run_id=run_id, epoch=epochs_completed)
 
     eval_best_cost = eval_best_per_map[0]  # reference map best cost for summary
     eval_best_epoch = eval_best_epoch_per_map[0]

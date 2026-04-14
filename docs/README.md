@@ -5,7 +5,8 @@
 - [problem_definition.md](problem_definition.md) — What we're solving: neutral atom reconfiguration to minimize parallel execution cost
 - [pipeline.md](pipeline.md) — Training pipeline: features → network → MCTS → training targets
 - [architecture.md](architecture.md) — File structure, interfaces, hyperparameters, device lifecycle
-- [mcts_selfplay_diagnostics.md](mcts_selfplay_diagnostics.md) — Critical read of the MCTS/self-play pipeline, hyperparameter health checklist, and logging plan for actor-critic dataset scale-up
+- [mcts_selfplay_diagnostics_v2.md](mcts_selfplay_diagnostics_v2.md) — **Current.** MCTS/self-play critical read (HEAD `75a8498`), hyperparameter health checklist, scaling blockers, and logging plan for AC dataset
+  - [mcts_selfplay_diagnostics.md](mcts_selfplay_diagnostics.md) — v1 (kept as changelog; v1 flagged issues that were already fixed on HEAD — see v2 §0 for the diff)
 
 ## Reward modes
 
