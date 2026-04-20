@@ -37,6 +37,7 @@ class Game:
         self.mcts_reward_sum_stds = []
         self.mcts_reward_abs_sum_means = []
         self.mcts_boundary_reach_fracs = []
+        self.mcts_reached_terminal_fracs = []
         self.mcts_sign_changes_means = []
 
     def terminal(self):
@@ -80,6 +81,7 @@ class Game:
         self.mcts_reward_sum_stds.append(getattr(root, '_mcts_reward_sum_std', 0))
         self.mcts_reward_abs_sum_means.append(getattr(root, '_mcts_reward_abs_sum_mean', 0))
         self.mcts_boundary_reach_fracs.append(getattr(root, '_mcts_boundary_reach_frac', 0))
+        self.mcts_reached_terminal_fracs.append(getattr(root, '_mcts_reached_terminal_frac', 0))
         self.mcts_sign_changes_means.append(getattr(root, '_mcts_sign_changes_mean', 0))
 
     def cache_observation(self):
@@ -148,6 +150,7 @@ class Game:
             'mcts_reward_sum_stds': self.mcts_reward_sum_stds,
             'mcts_reward_abs_sum_means': self.mcts_reward_abs_sum_means,
             'mcts_boundary_reach_fracs': self.mcts_boundary_reach_fracs,
+            'mcts_reached_terminal_fracs': self.mcts_reached_terminal_fracs,
             'mcts_sign_changes_means': self.mcts_sign_changes_means,
         }
 
@@ -181,5 +184,6 @@ class Game:
         game.mcts_reward_sum_stds = d.get('mcts_reward_sum_stds', [])
         game.mcts_reward_abs_sum_means = d.get('mcts_reward_abs_sum_means', [])
         game.mcts_boundary_reach_fracs = d.get('mcts_boundary_reach_fracs', [])
+        game.mcts_reached_terminal_fracs = d.get('mcts_reached_terminal_fracs', [])
         game.mcts_sign_changes_means = d.get('mcts_sign_changes_means', [])
         return game

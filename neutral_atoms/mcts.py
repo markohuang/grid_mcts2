@@ -97,6 +97,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
     total_reward_sq_sum = 0.0
     total_abs_reward_sum = 0.0
     total_boundary_sims = 0
+    total_reached_terminal_sims = 0
     total_sign_changes = 0
     for _ in range(config.num_simulations):
         node = root
@@ -148,6 +149,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
             # node stays childless; subsequent sims reaching here re-bootstrap with 0.
             network_output = None
             leaf_value = 0.0
+            total_reached_terminal_sims += 1
         _expand_node(node, legal, network_output, result.reward,
                      sim_env=sim_env, config=config)
         _backpropagate(
@@ -163,6 +165,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
     root._mcts_reward_sum_std = math.sqrt(reward_var)
     root._mcts_reward_abs_sum_mean = total_abs_reward_sum / num_sims
     root._mcts_boundary_reach_frac = total_boundary_sims / num_sims
+    root._mcts_reached_terminal_frac = total_reached_terminal_sims / num_sims
     root._mcts_sign_changes_mean = total_sign_changes / num_sims
 
 

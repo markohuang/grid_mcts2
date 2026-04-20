@@ -82,6 +82,7 @@ def _game_metrics(game, game_time):
     avg_mcts_reward_sum_mean = _mean(game.mcts_reward_sum_means)
     avg_mcts_reward_abs = _mean(game.mcts_reward_abs_sum_means)
     avg_mcts_boundary_frac = _mean(game.mcts_boundary_reach_fracs)
+    avg_mcts_reached_terminal_frac = _mean(game.mcts_reached_terminal_fracs)
     avg_mcts_sign_changes = _mean(game.mcts_sign_changes_means)
     avg_mcts_reward_frac = _mean(game.mcts_reward_fracs)
     return {
@@ -96,6 +97,7 @@ def _game_metrics(game, game_time):
         'avg_mcts_reward_sum_mean': round(avg_mcts_reward_sum_mean, 4),
         'avg_mcts_reward_abs': round(avg_mcts_reward_abs, 4),
         'avg_mcts_boundary_frac': round(avg_mcts_boundary_frac, 3),
+        'avg_mcts_reached_terminal_frac': round(avg_mcts_reached_terminal_frac, 3),
         'avg_mcts_sign_changes': round(avg_mcts_sign_changes, 3),
         'avg_mcts_reward_frac': round(avg_mcts_reward_frac, 3),
         'game_time_s': round(game_time, 2),
