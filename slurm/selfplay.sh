@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=mcts_selfplay
-#SBATCH --account=def-CHANGEME
+#SBATCH --account=rrg-aspuru
 #SBATCH --array=0-19              # 20 jobs x 1000 games = 20k games per wave
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=64G
-#SBATCH --time=6:00:00
+#SBATCH --mem=32G
+#SBATCH --time=00:30:00
 #SBATCH --output=slurm/logs/selfplay_%A_%a.out
 
 # --- Configuration (edit these) ---
-DATASET_DIR=${DATASET_DIR:-~/projects/def-CHANGEME/grid_mcts2/datasets/wave01}
+DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave01}
 WEIGHTS_PATH=${WEIGHTS_PATH:-""}    # empty = random init / fakenet per preset
 MAP_NUM=${MAP_NUM:-2}               # 2 = 5x5 12qb (see MAPS in config.py)
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
@@ -17,10 +17,10 @@ BATCH_SIZE=62                       # games per batch file (one per parallel wav
 PRESET=${PRESET:-hpc}               # hpc=800 sims; override with PRESET=default for smoke
 
 # --- Environment ---
-module load StdEnv/2023 python/3.11
-source ~/projects/def-CHANGEME/venvs/grid_mcts2/bin/activate
-
-cd ~/grid_mcts2
+module load StdEnv/2023
+module load python/3.11 scipy-stack
+cd /home/huang651/grid_mcts2
+source /home/huang651/grid_mcts2/.venv/bin/activate
 
 NODE_ID="node${SLURM_ARRAY_TASK_ID}"
 
