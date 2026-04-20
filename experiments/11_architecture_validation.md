@@ -173,3 +173,33 @@ The architecture change is necessary but not sufficient. The real bottleneck is 
 1. **Fixed map pool training**: Train on a small fixed pool of 10-20 maps for many epochs. The model sees each map repeatedly (like the specialist) but must generalize across the pool. Middle ground between sequential specialist (1 map, no generalization) and pure random (new map every game, no depth).
 
 2. **Increase p_hsize**: Match policy head to value head size (p_hsize=64) so the transformer has enough capacity for meaningful attention in the policy network.
+
+## Design decision (2026-04-20): bet on data scale
+
+**Assumption.** With (a) the cross-positional representation validated by the supervised task (r=0.954 on held-out), (b) a transformer that self-attends over qubits and tasks, and (c) the new `p_hsize=64` policy capacity, the architecture and features are no longer the bottleneck on 5x5. 11A hit SMT-tight cost=11 on the specialist — the model provably *can* represent the solution. The generalist plateau is a sample-efficiency / regime problem, not a representational one.
+
+**The gap that actually matters.** Our self-play budget has been the first-order limit all along. Comparison with the MCTS frameworks whose design we inherit:
+
+| System | Self-play games (order) | Sims per move | Notes |
+|---|---|---|---|
+| AlphaDev | ~10^9 moves, 10^7+ games | ~800 | TPU pool for weeks per problem |
+| AlphaZero chess | ~44 M games | 800 | 5000 TPUs, 9 h |
+| AlphaZero Go | ~29 M games | 1600 | 5000 TPUs, 13 days |
+| lc0 | ~10^8+ games (ongoing) | 800 training / 10k tournament | distributed contribution |
+| **Ours (R10-R13)** | ~10^3–10^4 games per run | 50–800 | single-process per epoch |
+| **Wave01 (HPC one shot)** | **2 × 10^4 games** | 800 | 20-node SLURM array, untrained weights |
+
+Even wave01's 20k games is 3-4 orders of magnitude below AlphaZero and 5+ below AlphaDev, at a *smaller* branching factor (~12 vs ~35-400). Before considering further representational surgery or new inductive biases, we commit to exhausting the data-scale lever.
+
+**Decision.** Default posture for the next round of work: scale self-play throughput, not architecture. Concretely:
+
+1. Run HPC self-play waves in the 10^5 - 10^6 game range per training checkpoint, cycling selfplay → offline training → new checkpoint (AlphaDev loop, not per-epoch inline self-play).
+2. Only revisit architecture if a post-scale diagnostic shows the value/policy head failing to fit the collected data (i.e. train loss plateau with held-out cost predictability low) — that would be evidence the inductive bias genuinely caps performance rather than the training signal.
+3. Hold the arch stable (transformer + cross-pos + p_hsize=64) across scale-up so checkpoints remain comparable across waves.
+
+**Counter-conditions that would override this bet.** If we observe any of:
+- train loss plateau at high residual but held-out SMT-matching still out of reach,
+- value-cost correlation staying low even with 10^5+ games per checkpoint,
+- MCTS depth refusing to rise above ~5 despite visible policy/value improvement,
+
+then the representation or architecture is the bottleneck after all and we reopen R11's question with harder tests (e.g. graph-structured features, larger task encoders, or non-transformer planners).

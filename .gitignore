@@ -57,3 +57,6 @@ deprecated/
 
 # Old analysis scripts and logs (not part of core pipeline)
 exploration.ipynb
+
+
+data_selfplay/

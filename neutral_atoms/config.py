@@ -135,7 +135,10 @@ def get_config():
 
     c.network = ml_collections.ConfigDict()
     c.network.v_hsize = 64
-    c.network.p_hsize = 32
+    # 2026-04-20: bumped 32 -> 64 to match v_hsize. At dim=32 the policy transformer has
+    # nhead=2 / 16 dims-per-head (R11 verdict): too narrow for meaningful attention and
+    # caused 5x slower specialist convergence.
+    c.network.p_hsize = 64
     c.network.mlp_depth = 2
     c.network.ema_decay = 0.995
     c.network.num_bins = 101
