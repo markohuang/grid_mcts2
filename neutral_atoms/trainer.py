@@ -35,11 +35,15 @@ def game_to_tensordict(game, td_steps):
     }, batch_size=len(game.history))
 
 
-def load_dataset_into_buffer(dataset_dir, env_config, td_steps, buffer,
+def load_dataset_into_buffer(dataset_dirs, env_config, td_steps, buffer,
                              filter_class=None, filter_map_id=None):
     from .data import scan_dataset, load_game_batches
-    batch_files = scan_dataset(dataset_dir, filter_class=filter_class,
-                               filter_map_id=filter_map_id)
+    if isinstance(dataset_dirs, str):
+        dataset_dirs = [dataset_dirs]
+    batch_files = []
+    for d in dataset_dirs:
+        batch_files.extend(scan_dataset(d, filter_class=filter_class,
+                                        filter_map_id=filter_map_id))
     game_dicts = load_game_batches(batch_files)
     loaded = 0
     for gd in game_dicts:
@@ -250,8 +254,9 @@ class AlphaAtomsTrainer:
                 indices, torch.full((len(indices),), priority)
             )
 
-    def fit(self):
+    def fit(self, training_steps=None):
         cfg = self.config.training
+        n_steps = training_steps if training_steps is not None else cfg.training_steps
         if self.network.use_fake:
             print("  (FakeNet: skipping training)")
             return None
@@ -264,7 +269,7 @@ class AlphaAtomsTrainer:
 
         model.train()
         last_losses = None
-        for iteration in range(cfg.training_steps):
+        for iteration in range(n_steps):
             batch = self.replay_buffer.sample(cfg.batch_size)
             batch = batch.to(fabric.device)
             if self._sym_perms is not None:
@@ -289,7 +294,7 @@ class AlphaAtomsTrainer:
             last_losses['grad_norm'] = round(grad_norm, 4)
 
             if (iteration + 1) % cfg.log_interval == 0:
-                print(f"  step {iteration+1}/{cfg.training_steps}, "
+                print(f"  step {iteration+1}/{n_steps}, "
                       f"loss: {last_losses['total']:.4f} "
                       f"(pi={last_losses['policy']:.3f} "
                       f"cv={last_losses['correctness']:.3f} "
@@ -298,7 +303,7 @@ class AlphaAtomsTrainer:
         model.eval()
         return last_losses
 
-    def _lineage_metadata(self, run_id=None, epoch=None):
+    def _lineage_metadata(self, run_id=None, epoch=None, parent_ckpt=None):
         import hashlib, json
         from .experiment import _git_metadata
         git = _git_metadata()
@@ -308,6 +313,7 @@ class AlphaAtomsTrainer:
         return {
             'run_id': run_id,
             'parent_run': self.config.experiment.parent_run,
+            'parent_ckpt': parent_ckpt or '',
             'epoch': epoch,
             'training_steps': self.network.training_steps(),
             'git_sha': git['git_commit'],
@@ -315,10 +321,10 @@ class AlphaAtomsTrainer:
             'config_hash': config_hash,
         }
 
-    def save_checkpoint(self, path, run_id=None, epoch=None):
+    def save_checkpoint(self, path, run_id=None, epoch=None, parent_ckpt=None):
         if self.network.use_fake:
             return
-        meta = self._lineage_metadata(run_id=run_id, epoch=epoch)
+        meta = self._lineage_metadata(run_id=run_id, epoch=epoch, parent_ckpt=parent_ckpt)
         if self._fabric is not None:
             state = {"model": self._model, "optimizer": self._optimizer, **meta}
             self._fabric.save(path, state)

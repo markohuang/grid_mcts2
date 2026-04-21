@@ -109,8 +109,8 @@ Numbers that indicate **search is not working**. Compare future waves against th
 | [v2f](#v2f-reverted-config) | FakeNet | **10000** | dirichlet **0.03**, τ=1.0, layer_delta, pb_c_base=**19652** | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02f_reverted | ✅ done |
 | [v2g](#v2g-middle-ground-exploration) | FakeNet | 10000 | dirichlet 0.03, τ=1.0, layer_delta, pb_c_base=**5000** | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02g_pbc5000 | ✅ done |
 | [v2h](#v2h-middle-ground-dirichlet) | FakeNet | 10000 | dirichlet **0.1**, τ=1.0, layer_delta, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02h_dir0.1 | ✅ done |
-| [v2i](#v2i-crank-sims) | FakeNet | **20000** | dirichlet 0.03, τ=1.0, layer_delta, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02i_20ksims | 🟡 queued |
-| [v2j](#v2j-reward-mode-ablation) | FakeNet | 10000 | dirichlet 0.03, τ=1.0, **plan_cost**, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02j_plancost | 🟡 queued |
+| [v2i](#v2i-crank-sims) | FakeNet | **20000** | dirichlet 0.03, τ=1.0, layer_delta, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02i_20ksims | ✅ done |
+| [v2j](#v2j-reward-mode-ablation) | FakeNet | 10000 | dirichlet 0.03, τ=1.0, **plan_cost**, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02j_plancost | ✅ done |
 
 ¹ v2e had 1 job timeout at `--time=01:00:00` (776 games short). v2f uses `--time=01:30:00`.
 
@@ -405,7 +405,52 @@ Results:
 
 ---
 
-## v2 summary (updated 2026-04-20 after v2g/v2h results)
+## v2 FINAL summary (updated 2026-04-21 after v2i/v2j results)
+
+### One-glance comparison
+
+| Wave | config | n | cost min / med / mean | `corr(depth, cost)` | `reached_terminal_frac` | notes |
+|---|---|---:|---:|---:|---:|---|
+| v1   | plan_cost, 800 sims, pb_c_base=500, α=0.3, τ=2 | 20000 | 21 / 32 / 32.4 | +0.07 | — | baseline; search not functional |
+| v2a  | FakeNet, 800 sims, same | 20000 | 21 / 32 / 32.5 | +0.09 | — | ≡ v1, NN init contributed nothing |
+| v2b  | 2000 sims, same | 20000 | 18 / 32 / 31.8 | +0.09 | — | 2.5× compute → marginal |
+| v2c  | dirichlet=0.5, same | 20000 | 21 / 32 / 32.4 | +0.06 | — | no-op, dirichlet shape not the lever |
+| v2d  | 800 sims, layer_delta, τ=1 | 20000 | 19 / 31 / 30.7 | +0.09 | — | first `corr(root_v, cost)` to drop to ~0 |
+| v2e  | 10k sims, layer_delta, pb_c_base=**500**, α=0.3 | 19224 | 16 / 28 / 27.7 | +0.05 | — | more sims + bad config |
+| **v2f**  | 10k sims, layer_delta, **pb_c_base=19652, α=0.03** | 20000 | 13 / 23 / 23.4 | −0.04 | — | reverted to AlphaDev defaults; big gain |
+| v2g  | v2f but pb_c_base=5000 | 20000 | 15 / 25 / 24.7 | −0.01 | — | middle-ground regressed |
+| v2h  | v2f but α=0.1 | 20000 | 13 / 23 / 23.4 | −0.07 | 0.251 | matched v2f on cost, slight corr improvement |
+| v2i  | v2f but 20k sims | 1000 | 15 / 22 / 22.1 | −0.15 | 0.287 | 2× compute → median −1, `reached_terminal_frac` sub-linear |
+| **v2j**  | v2f but reward_mode=**plan_cost** | 1000 | **12** / 21 / 21.1 | **−0.24** | 0.331 | plan_cost BEAT layer_delta at this config point |
+
+Round-04 reported best (map 2, 5×5 12qb): **cost=12**. v2j matched it; v2f was 1 off.
+
+### Key empirical conclusions
+
+1. **Reward mode is not settled.** v2j showed plan_cost > layer_delta on cost AND correlations at (10k sims, FakeNet, AlphaDev defaults, map 2). This contradicts v2d's motivation for switching to layer_delta — which was based on v1's anti-informative `corr(root_v, cost)=+0.18`. That signal turned out to be an artifact of random-init NN at 800 sims, not a plan_cost problem per se. Both reward modes should be tested on random maps in v3.
+2. **pb_c_base=19652, dirichlet=0.1** are the confirmed defaults going forward. AlphaDev's pb_c_base revert (500 → 19652) was large but empirically correct; dirichlet 0.03 → 0.1 (v2h) slightly improved correlations with no cost regression.
+3. **`reached_terminal_frac` scales sub-linearly with compute.** 10k sims → 0.25, 20k sims → 0.29. To push toward full-depth (0.9+) via raw compute alone would need far more sims than we're using. Selective-deepening is the actual lever for value-head bypass.
+4. **v2j's better cost comes from stronger EXPLOITATION, not more exploration.** Policy entropy dropped (1.79 → 1.22), depth std rose (0.09 → 0.20), `corr(depth, cost)` became strongly negative (−0.04 → −0.24). These are signs of search committing more sharply to good moves — which works well when the reward signal is informative.
+5. **All waves on map 2 produce 100% unique trajectories** (verified by action-sequence hashing at n=20k). The `unique_triples_frac` proxy I invented was misleading: it collided ~5.6× distinct trajectories into each triple at n=20k, and saturates mechanically at small n. Fixed by flagging; threshold will need redefinition.
+
+### Methodology lessons
+
+- **Proxy metrics must be validated against ground truth** before being used to draw conclusions. `unique_triples_frac` at n=20k looked "low" (17.8%) because of collision, not because of lack of diversity; same proxy at n=1000 looks "high" (75%) because of sample-size saturation. Both mistakes were avoidable by running the real trajectory-hash check.
+- **Single-variable ablations before multi-variable changes.** v2d changed reward_mode AND temperature; v2f reverted pb_c_base AND dirichlet. Single-knob v2g/v2h/v2j were needed to decompose. Should've started that way.
+- **Fixed-map-from-wave-01 was an unflagged assumption.** It shaped every wave's interpretation. Random maps (v3) are the right mode for training data.
+- **Sample-size context matters for comparison.** v2i's min=15 vs v2f's min=13 was not a regression — at n=1000 drawn from v2f's distribution, expected min is 15.12 (Monte Carlo). The "+2" I initially reported was misleading.
+
+### Decisions locked in for v3
+
+- **Random maps, every game** (`random_board=True`, `random_board_seed=-1`). Requires port of `random_board` support into `selfplay_worker.py` (known gap).
+- **pb_c_base=19652, pb_c_init=1.25, dirichlet=0.1, τ=1 constant** (current `config.py` defaults post-v2h adoption).
+- **Both reward modes tested in parallel**: v3a = plan_cost (v2j's winner), v3b = layer_delta (v2f's baseline). No default picked until random-map data exists.
+- **20k games per wave, 10k sims per decision.** Matches v2f/v2h scale.
+- **Map 2 retained for benchmarking only** — separate eval script, not part of v3 training data.
+
+---
+
+## v2 summary (original draft, 2026-04-20 after v2g/v2h, BEFORE v2i/v2j)
 
 ### Core empirical facts
 
@@ -453,9 +498,16 @@ Results:
 | ~ 0.3 | < 23 | compute helps cost via some other path (e.g. Q estimate refinement) without bypassing value head |
 | ~ 0.3 | ~ 23 | 2x compute is a no-op at this scale → selective-deepening lever, not sims budget, is the limiting factor |
 
-Results:
+### Results (wave02i_20ksims, n=1000)
 
-*(pending)*
+- cost min / q10 / median / q75 / max: **15 / 19 / 22 / 24 / 32**, mean 22.06
+- `reached_terminal_frac = 0.287` (vs 0.251 at 10k sims in v2h)
+- Depth mean 4.86, depth std 0.100
+- `corr(entropy, cost) = +0.424` (passes stretch); `corr(depth, cost) = −0.145`; `corr(root_v, cost) = −0.138`
+
+**Landed in the third row of the matrix**: `reached_terminal_frac ~ 0.29, cost_median < v2f`. Interpretation: more compute helps cost modestly (median −1) without meaningfully bypassing the value head. **Selective-deepening is the actual bottleneck for value-head bypass, not raw sim budget.**
+
+Note on min=15: at n=1000 resampled from v2f's distribution (Monte Carlo), expected min is 15.12 with P(min=15) = 45%. v2i's min is consistent with v2f — not a regression, just sample-size.
 
 ---
 
@@ -474,9 +526,27 @@ Results:
 
 **Caveat:** v2j's result is specific to fixed map 2, 10k sims, FakeNet, and AlphaDev defaults. Does not settle reward_mode in the trained-value regime or on random maps. Those are separate experiments.
 
-Results:
+### Results (wave02j_plancost, n=1000)
 
-*(pending)*
+- cost min / q10 / median / q75 / max: **12 / 18 / 21 / 23 / 30**, mean 21.06
+- **min = 12 matches Round-04's reported best** — first wave to do so.
+- `reached_terminal_frac = 0.331` (higher than v2i's 0.287 at 2× sim budget)
+- `policy_entropy = 1.219` (much more concentrated than v2f's 1.794) — **more exploitative**
+- `mcts_depth std = 0.199` (first wave > 0.1) — problem-adaptive search kicking in
+- `corr(depth, cost) = −0.242` (6× stronger than v2f's −0.039) — deeper search predicts better outcomes
+- `corr(noop, cost) = −0.493` (passes stretch)
+- game_time 168s (vs v2f's 246s at same sim count) — plan_cost is ~32% faster per game, likely because more sims reach terminal and skip NN inference
+
+**plan_cost beats layer_delta on every cost metric and on most correlations at this config.** The better outcome comes from *effective exploitation* (lower entropy, deeper search, stronger depth-cost link), not from more exploration. Both entropy and top-100 entropy gap shrank.
+
+**What this reverses:** v2d switched to layer_delta because v1's `corr(root_v, cost) = +0.18` looked anti-informative. v2j got `corr(root_v, cost) = −0.038` with **plan_cost** — the v1 problem wasn't plan_cost itself, it was random-init NN + 800 sims. At 10k sims with FakeNet, plan_cost has no such bias.
+
+**What this does NOT settle:**
+- Whether plan_cost still wins on random maps (map 2 oracle-gradient-shape could be giving plan_cost an unfair edge).
+- Whether plan_cost still wins with a trained value head.
+- Whether layer_delta's broader policy targets might be better for first training pass (plan_cost's sharper targets = less to learn from per state).
+
+Both reward modes go to v3.
 
 ---
 

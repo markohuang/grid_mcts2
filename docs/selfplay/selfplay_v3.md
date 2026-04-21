@@ -17,11 +17,12 @@ Continuation of `selfplay_waves.md` (v1–v2 on fixed map 2). v3 shifts to rando
 3. **Per-game maps are approximately as hard as map 2** — because `map_generator` is structure-preserving. But we have no direct validation of this — each random map has an unknown optimum, so "is game X cost 30 good or bad?" becomes unanswerable without a per-map oracle. We won't have per-wave absolute cost targets anymore.
 4. **Cost distribution at the wave level is still meaningful** — even though individual game costs aren't comparable to a known optimum, the wave-level distribution across maps reflects "how well does search do on a random instance of this problem class".
 
-### Known gaps — need fixing before v3a runs
+### Known gaps — status
 
-5. **`selfplay_worker.py` does NOT currently implement `random_board`.** Verified at `selfplay_worker.py:run_worker` — it calls `get_map_data(config)` once and reuses the same `tasks` / `initial_positions` for every game in the wave. The `random_board` switch is only honored in the in-process `trainer._get_game_instance` path (`trainer.py:139-166`). **This must be ported** before v3a can launch. The port is small (~20 lines), but it changes the per-worker game-loop structure.
-6. **`map_id` / `map_class` stamping on per-game dicts works with varying maps.** Currently `save_game_batch` stamps a single `map_id` per batch directory based on one map. This likely needs changing so each game has its own `map_id` in the parquet index and the batch storage is map-agnostic (one flat directory, not `games/{map_class}/{map_id}/...`). **Also needs porting**; size ~30 lines.
-7. **`check_wave_health.py` assumes single-map data** for cost comparisons. On a multi-map wave, absolute cost across all games mixes apples with oranges. Need to report either per-map stats or cost-relative-to-per-map-baseline. Roughly 1 hour of work.
+5. **`selfplay_worker.py` `random_board` support**: ✅ ported 2026-04-21. `_play_single_game` now regenerates a fresh map per game in the worker process when `config.random_board=True`. `_enrich_game_dict` derives per-game `map_id` from `Game.tasks` + `initial_positions`. Smoke-tested with 6 games → 6 distinct `map_id`s, single shared `map_class`. Parquet index has per-game `map_id`.
+6. **`save_game_batch` map-id placeholder**: ✅ done. Added `map_id_override` optional arg. When `random_board=True`, batches land in `games/{map_class}/mixed/{batch}.pt` — keeps per-class directory for filtering without per-game directory explosion.
+7. **`save_map_spec` skip on random**: ✅ done. `run_worker` skips per-wave map-spec JSON dump when `random_board=True` (reference map is a template, not an actual map any game uses). Per-game map info lives in the .pt game dicts and the parquet index.
+8. **`check_wave_health.py` multi-map support**: ⚠️ NOT yet ported. Current script reports cost stats over the full wave, which on random maps mixes different problem instances. **Still works for cross-wave aggregate comparisons** (e.g. "v3a mean cost vs v3b mean cost") because both waves draw from the same structure-class distribution — just not meaningful for per-game interpretation. Refinement deferred until after first v3 results.
 
 ### Soft assumptions — worth noting but wouldn't break things
 
@@ -36,26 +37,34 @@ Continuation of `selfplay_waves.md` (v1–v2 on fixed map 2). v3 shifts to rando
 13. **Curriculum over map difficulty** — config has `curriculum_maps` support but v3a doesn't use it. Deferred.
 14. **Priority sampling** — `priority_exponent=0.0` (uniform sampling). Deferred to train_offline.py phase.
 
-## v3a — first random-map wave
+## v3a and v3b — first random-map waves (A/B on reward_mode)
 
-### Config (to be exact)
+After v2j showed plan_cost > layer_delta on fixed map 2, reward_mode became an open question for random maps. v3a and v3b are a clean A/B — identical otherwise.
+
+### Shared config
 
 ```
 --config.use_fake=True
---config.map_num=2                    # determines structure template (5x5 12qb 4gpl 3lyrs)
---config.random_board=True            # NEW — wave per-game randomizer
+--config.map_num=2                      # structure template only (5x5 12qb 4gpl 3lyrs)
+--config.random_board=True              # freshly-generated map per game
 --config.mcts.num_simulations=10000
---config.mcts.root_dirichlet_alpha=0.1  # new default (adopted from v2h)
---config.env.reward_mode=layer_delta
-# pb_c_base=19652, pb_c_init=1.25, tau=1 constant inherited from config.py defaults
+# pb_c_base=19652, pb_c_init=1.25, dirichlet=0.1 inherited from config.py defaults
+# temperature_init=1.0 constant (decay_moves=0) inherited
 ```
 
-### Shape
+### Shape (each wave)
 
-- 1000 games total
-- 5 jobs × 200 games/node
-- `--time=00:30:00` (same as v2f/v2j at 10k sims)
-- Dataset: `/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave03a_rnd`
+- 20000 games total
+- 20 jobs × 1000 games/node
+- `--time=01:30:00`
+- Launch: `sbatch slurm/selfplay_v3a.sh` and `sbatch slurm/selfplay_v3b.sh`
+
+### The A/B
+
+| wave | reward_mode | dataset |
+|---|---|---|
+| v3a | **plan_cost** (v2j winner on map 2) | `wave03a_rnd_plancost` |
+| v3b | **layer_delta** (v2f default on map 2) | `wave03b_rnd_layerdelta` |
 
 ### What we'll learn
 
@@ -64,16 +73,14 @@ Continuation of `selfplay_waves.md` (v1–v2 on fixed map 2). v3 shifts to rando
 3. **Does `corr(root_v, cost)` stay near zero or pick up a sign?** On map 2 the correlation was near-zero due to shallow-depth value-head bias; random-map waves are a cleaner test of this because per-game value targets aren't confounded by a single oracle best.
 4. **Per-map cost variance vs within-map cost variance.** This is the critical training-data-quality question: are 1000 games on 1000 different maps more diverse than 1000 games on one map? We hypothesize yes; v3a measures it.
 
-## Prerequisites before launching v3a
+## Prerequisites — status (updated 2026-04-21)
 
-In order:
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 1 | Port `random_board` in `selfplay_worker.py` | ✅ | `_play_single_game` regenerates per-game; smoke-tested |
+| 2 | `save_game_batch` per-game map_id handling | ✅ | `map_id_override='mixed'` path component |
+| 3 | `_enrich_game_dict` per-game stamping | ✅ | derived from `Game.tasks` + `initial_positions` |
+| 4 | `check_wave_health.py` multi-map support | ⚠️ deferred | aggregate numbers still meaningful for A/B; per-map breakdown after first v3 results |
+| 5 | End-to-end smoke test | ✅ | 6-game run produced 6 distinct `map_id`s, 1 `map_class` |
 
-1. **Port `random_board` support into `selfplay_worker.py`.** Roughly: wrap `_play_single_game` call-site so that per-game, if `config.random_board`, regenerate a fresh map via `generate_random_map` and use those `tasks` + `initial_positions` instead of the shared ones.
-2. **Make `data.save_game_batch` handle per-game `map_id`.** Either flatten the directory layout (all batches in one dir, `map_id` tracked in the game dict/index) or include multiple `map_id` subdirectories per batch. The flat layout is simpler.
-3. **Stamp `map_id` / `map_class` per-game in `_enrich_game_dict`.** Already happens (lines 100-101 in selfplay_worker) — just need to make sure each game's map is correctly threaded.
-4. **Update `check_wave_health.py` for multi-map aggregation.** At minimum: group by `map_id`, report within-map cost distributions + cross-map aggregate. Add a column `num_distinct_maps` to the summary.
-5. **Smoke test on a 10-game run.** Verify random maps generate, different `map_id`s land in the index, cost distributions look plausible.
-
-Estimated total implementation time: 3–4 hours, mostly in (1) and (4).
-
-Will not write the v3a slurm script until all five prerequisites land. Will not implement any prerequisite until we've aligned on whether v3 is the right direction (vs e.g. warming up a value head first, or porting more trainer features).
+**Ready to launch v3a and v3b.**

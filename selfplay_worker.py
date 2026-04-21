@@ -36,12 +36,13 @@ from neutral_atoms.experiment import compute_solution_cost, _git_metadata
 
 
 # lineage fields we copy from a loaded checkpoint into each game dict
-_CKPT_LINEAGE_FIELDS = ('run_id', 'parent_run', 'epoch', 'training_steps',
+_CKPT_LINEAGE_FIELDS = ('run_id', 'parent_run', 'parent_ckpt', 'epoch', 'training_steps',
                         'git_sha', 'git_dirty', 'config_hash')
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions,
-                      network_config_dict, use_fake, training_steps):
+                      network_config_dict, use_fake, training_steps,
+                      reference_map=None):
     torch.set_num_threads(1)
     import ml_collections
     config = ml_collections.ConfigDict(config_dict)
@@ -50,6 +51,20 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions,
     if not use_fake and state_dict is not None:
         net.load_state_dict(state_dict)
     net.eval()
+    # If random_board is on, regenerate a fresh map for THIS game only. Each worker
+    # draws independently; truly random per call when random_board_seed=-1.
+    if config.random_board:
+        from neutral_atoms.map_generator import generate_random_map
+        from neutral_atoms.config import atom_map_to_positions
+        ref = reference_map
+        gates_per_layer = max(len(layer) for layer in ref['tasks'])
+        seed = config.random_board_seed if config.random_board_seed >= 0 else None
+        m = generate_random_map(
+            ref['board_dim'], ref['num_qubits'], len(ref['tasks']),
+            gates_per_layer=gates_per_layer, seed=seed,
+        )
+        tasks = m['tasks']
+        initial_positions = atom_map_to_positions(m['atom_map'], config.env.board_width)
     t0 = time.time()
     game = Game(config, tasks, initial_positions)
     game = play_game(game, config.mcts, net)
@@ -107,8 +122,21 @@ def _game_metrics(game, game_time):
 
 def _enrich_game_dict(gd, game, game_time, map_data, config, weights_path,
                       training_steps, weight_lineage, selfplay_context):
-    gd['map_id'] = map_id(map_data)
-    gd['map_class'] = map_class(map_data)
+    # When random_board=True, each game has its own unique map. Derive map_id from
+    # the game's actual tasks + initial_positions (not from the shared reference map).
+    if config.random_board:
+        w = config.env.board_width
+        per_game_map = {
+            'board_dim': map_data['board_dim'],
+            'num_qubits': map_data['num_qubits'],
+            'atom_map': [r * w + c for (r, c) in game.initial_positions],
+            'tasks': game.tasks,
+        }
+        gd['map_id'] = map_id(per_game_map)
+        gd['map_class'] = map_class(per_game_map)
+    else:
+        gd['map_id'] = map_id(map_data)
+        gd['map_class'] = map_class(map_data)
     gd['cost'] = compute_solution_cost(game)
     gd['num_simulations'] = config.mcts.num_simulations
     gd['weight_gen'] = training_steps
@@ -134,7 +162,10 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
     tasks = map_data['tasks']
     initial_positions = atom_map_to_positions(map_data['atom_map'],
                                               config.env.board_width)
-    save_map_spec(dataset_dir, map_data)
+    # Skip map_spec dump when random_board=True — the reference map is only a template
+    # for structure, not the actual map any game uses. Per-game map_id lives in the index.
+    if not config.random_board:
+        save_map_spec(dataset_dir, map_data)
 
     network = Network(config.network, use_fake=config.use_fake)
     state_dict = None
@@ -193,6 +224,10 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
     all_game_times = []
     t_start = time.time()
 
+    # For random_board, we use a placeholder map_id at the directory level since each
+    # game has a distinct per-game map_id stored in its own dict + the parquet index.
+    save_map_id_override = 'mixed' if config.random_board else None
+
     while total_played < num_games:
         chunk = min(batch_size, num_games - total_played)
         t_batch = time.time()
@@ -201,7 +236,7 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
             futures.append(pool.submit(
                 _play_single_game, state_dict, config_dict, tasks,
                 initial_positions, network_config_dict, config.use_fake,
-                training_steps,
+                training_steps, map_data if config.random_board else None,
             ))
 
         game_dicts = []
@@ -218,7 +253,8 @@ def run_worker(config, map_data, dataset_dir, num_games, num_workers,
             all_game_times.append(game_time)
             total_played += 1
 
-        path = save_game_batch(dataset_dir, game_dicts, map_data, node_id, batch_seq)
+        path = save_game_batch(dataset_dir, game_dicts, map_data, node_id, batch_seq,
+                               map_id_override=save_map_id_override)
         batch_file_rel = os.path.relpath(path, dataset_dir)
         append_index(dataset_dir, game_dicts, batch_file_rel, node_id, batch_seq)
         batch_elapsed = time.time() - t_batch

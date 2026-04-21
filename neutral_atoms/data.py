@@ -70,9 +70,10 @@ def save_map_spec(dataset_dir, map_data):
     return mid
 
 
-def save_game_batch(dataset_dir, games_dicts, map_data, node_id, batch_seq):
+def save_game_batch(dataset_dir, games_dicts, map_data, node_id, batch_seq,
+                    map_id_override=None):
     mc = map_class(map_data)
-    mid = map_id(map_data)
+    mid = map_id_override if map_id_override is not None else map_id(map_data)
     batch_dir = os.path.join(dataset_dir, 'games', mc, mid)
     os.makedirs(batch_dir, exist_ok=True)
     filename = f'batch_{node_id}_{batch_seq:06d}.pt'
