@@ -301,7 +301,7 @@ def append_to_registry(output_dir, run_id, config, metrics):
         'root_exploration_fraction': config.mcts.root_exploration_fraction,
         'temperature_init': config.mcts.temperature_init,
         'temperature_final': config.mcts.temperature_final,
-        'temperature_decay_steps': config.mcts.temperature_decay_steps,
+        'temperature_decay_moves': config.mcts.temperature_decay_moves,
         'lr': config.training.lr,
         'batch_size': config.training.batch_size,
         'training_steps': config.training.training_steps,

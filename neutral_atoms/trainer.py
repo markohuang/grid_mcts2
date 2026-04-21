@@ -51,6 +51,8 @@ def load_dataset_into_buffer(dataset_dir, env_config, td_steps, buffer,
 
 
 def _play_single_game(state_dict, config_dict, tasks, initial_positions, network_config_dict, use_fake, training_steps):
+    # training_steps is retained for lineage stamping via the caller (_enrich_game_dict);
+    # it is NOT used inside play_game anymore (temperature is per-move, not per-step).
     torch.set_num_threads(1)
     import ml_collections
     config = ml_collections.ConfigDict(config_dict)
@@ -60,7 +62,7 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions, network
         net.load_state_dict(state_dict)
     net.eval()
     game = Game(config, tasks, initial_positions)
-    game = play_game(game, config.mcts, net, training_steps=training_steps)
+    game = play_game(game, config.mcts, net)
     return game
 
 
@@ -199,8 +201,7 @@ class AlphaAtomsTrainer:
         for idx in range(num_games):
             tasks, ip = self._get_game_instance()
             game = Game(self.config, tasks, ip)
-            game = play_game(game, self.config.mcts, self.network,
-                             training_steps=self.network.training_steps())
+            game = play_game(game, self.config.mcts, self.network)
             game_cost = compute_solution_cost(game)
             self.save_game(game, game_cost)
             games.append(game)

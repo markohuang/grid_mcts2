@@ -24,7 +24,9 @@ Targets for a self-play dataset to be "good enough" to warmstart an actor-critic
 |---|:-:|---:|---:|---|
 | cost median | ↓ | < 25 | < 18 | Round 04 hit 12 with trained NN. 2× optimum = "search is working"; 1.5× = unexpectedly good for search-only. |
 | cost min | ↓ | < 18 | < 13 | Across 20k games, the best should *reach* known-optimum territory. |
-| cost spread (q90−q10) | ↑ | > 8 | > 15 | distribution must be wide enough that top vs bottom games differ enough to learn from. Narrow = nothing to distill. |
+| rel_cost_spread: (q90−q10)/median | ↑ | > 0.30 | > 0.60 | scale-invariant spread. Absolute (q90-q10) mechanically shrinks when the distribution floor approaches optimum, so we normalize by median. Too narrow = nothing to distill; too wide at high median = search is unfocused. |
+| unique_triples_frac | ↑ | > 0.20 | > 0.40 | **training-data diversity proxy.** Fraction of games in a wave that have a unique (cost, move_distance, noop_frac) triple. Low fraction = 20k games are only a handful of distinct trajectories replicated — NN would overfit. Better proxy (trajectory hash) deferred. |
+| top100_unique_frac | ↑ | > 0.80 | > 0.95 | diversity among the *good* games. If top-100 all have identical triples, we found one good trajectory and played it 100 times — useless for learning the landscape of near-optima. |
 | policy_entropy median | ↓ | < 1.5 | < 1.0 | ln(12)=2.49 is uniform. < 1.5 ≈ concentrated on ≤ 4 actions. Networks can learn concentrated targets; not uniform ones. Interpretation depends on τ — report separately if τ changes. |
 | mcts_depth mean | ↑ | > 4.0 | > 5.5 | 800 sims b=10 uniform BFS tops out at depth 3. > 4 means selective deepening. Stretch 5+ is AlphaZero-style exploitation. |
 | mcts_depth std | ↑ | > 0.3 | > 0.8 | *the single most-diagnostic number.* Uniform BFS gives std≈0. Problem-adaptive search gives std > 0.3 — hard positions go deep, easy stay shallow. |
@@ -104,7 +106,11 @@ Numbers that indicate **search is not working**. Compare future waves against th
 | [v2c](#v2c--exploration) | random-init real NN | 800 | dirichlet 0.5 | 5x5_12qb_4gpl_3lyrs | 20000 | `335260ec` | wave02c_explore | 🟡 running |
 | [v2d](#v2d-temperature-reward-mode) | random-init real NN | 800 | dirichlet 0.3, τ=1.0, layer_delta | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02d_temp_layerdelta | ✅ done |
 | [v2e](#v2e-10k-sims-full-depth-target) | FakeNet | **10000** | dirichlet 0.3, τ=1.0, layer_delta, pb_c_base=500 | 5x5_12qb_4gpl_3lyrs | 19224¹ | tbd | wave02e_deepfull | ✅ done |
-| [v2f](#v2f-reverted-config) | FakeNet | **10000** | dirichlet **0.03**, τ=1.0, layer_delta, pb_c_base=**19652** | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02f_reverted | 🟡 queued |
+| [v2f](#v2f-reverted-config) | FakeNet | **10000** | dirichlet **0.03**, τ=1.0, layer_delta, pb_c_base=**19652** | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02f_reverted | ✅ done |
+| [v2g](#v2g-middle-ground-exploration) | FakeNet | 10000 | dirichlet 0.03, τ=1.0, layer_delta, pb_c_base=**5000** | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02g_pbc5000 | ✅ done |
+| [v2h](#v2h-middle-ground-dirichlet) | FakeNet | 10000 | dirichlet **0.1**, τ=1.0, layer_delta, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 20000 | tbd | wave02h_dir0.1 | ✅ done |
+| [v2i](#v2i-crank-sims) | FakeNet | **20000** | dirichlet 0.03, τ=1.0, layer_delta, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02i_20ksims | 🟡 queued |
+| [v2j](#v2j-reward-mode-ablation) | FakeNet | 10000 | dirichlet 0.03, τ=1.0, **plan_cost**, pb_c_base=19652 | 5x5_12qb_4gpl_3lyrs | 1000 | tbd | wave02j_plancost | 🟡 queued |
 
 ¹ v2e had 1 job timeout at `--time=01:00:00` (776 games short). v2f uses `--time=01:30:00`.
 
@@ -296,6 +302,177 @@ Results:
 - *boundary_frac doesn't move*: 10k sims still isn't enough; next step is either 20k or adding selective-deepening heuristic.
 
 **Runtime expectation:** at FakeNet speed (13 ms/sim), 10k sims × 24 steps ≈ 130s/game. 16 games/worker × 62 workers × 20 jobs → ~20k games in ~35 min/job. `--time=01:00:00` has plenty of buffer for non-linear tree-growth overhead.
+
+Results:
+
+*(pending)*
+
+---
+
+## v2f: reverted config (the real A/B)
+
+**Launch:** `sbatch slurm/selfplay_v2f.sh` (2026-04-20)
+**Difference from v2e:** `pb_c_base 500→19652`, `root_dirichlet_alpha 0.3→0.03` (Round-04 / AlphaDev defaults). Everything else matches v2e (FakeNet, 10k sims, layer_delta, τ=1.0). Pre-dates `reached_terminal_frac` metric addition.
+
+### Results (wave02f_reverted)
+
+| Metric | v2e | v2f | Δ |
+|---|---:|---:|---:|
+| cost min | 16 | **13** | −3 (= Round-04's reported best of 12 + 1) |
+| cost q10 | 24 | 20 | −4 |
+| cost median | 28 | **23** | −5 |
+| cost q75 | 30 | 25 | −5 |
+| cost mean | 27.73 | **23.43** | −4.30 |
+| cost max | 40 | 35 | −5 |
+| policy_entropy median | 2.298 | **1.794** | first wave with < 2.0 (search genuinely concentrating) |
+| mcts_depth mean | 4.244 | 4.475 | +0.23 |
+| mcts_depth std | 0.078 | 0.094 | slight increase but still not at the > 0.30 target |
+| `corr(depth, cost)` | +0.052 | **−0.039** | **first time negative** — deeper trees actually help |
+| `corr(entropy, cost)` | +0.303 | +0.356 | strengthens |
+| `corr(root_value, cost)` | −0.016 | −0.070 | more negative (good) |
+| `corr(noop, cost)` | −0.373 | **−0.405** | passes stretch |
+| top-100 entropy gap | +0.083 | +0.095 | growing |
+| top-100 depth gap | 0.000 | **+0.031** | **first time positive** — good games ARE searched deeper |
+| unique_triples_frac (wave) | 0.178 | 0.178 | identical |
+| top100_unique_frac | 0.890 | 0.940 | top-100 more diverse |
+| distinct trajectories at cost_min | 1 | **2** | first time >1 — multiple paths to near-optimum |
+| game_time | 134s | **246s** | +83% (deeper trees = more work per sim) |
+
+**Interpretation:**
+
+- **AlphaDev's `pb_c_base=19652` / `dirichlet=0.03` wins across the board** vs the `500` / `0.3` defaults introduced in an earlier session. Not a tradeoff — v2f is better on cost, on correlations, on search selectivity, AND marginally on top-K diversity. The earlier changes were a real regression.
+- The mechanism: at 10k sims, `pb_c_base=500` gives `pb_c≈4.3` (+244% over init) → forces uniform BFS. `pb_c_base=19652` gives `pb_c≈1.66` (+33%) → lets Q differentials drive selectivity once visits accumulate. Dirichlet `0.3` added uniform noise to all actions (drowning Q signal); `0.03` is spiky and only boosts one action, leaving the rest of the prior untouched.
+- **First wave where `corr(depth, cost)` is negative and top-100 depth gap is positive** — these are the "selective deepening actually works" signals we'd been missing.
+- **`cost_min = 13` is at Round-04's reported best.** Search can find near-optimal. Median still at 23 = 1.9× optimum — the remaining gap is "most games don't find the optimum consistently", which is fundamentally about the value head being untrained.
+
+**Concluding verdict:** `config.py` defaults reverted to AlphaDev/Round-04 values. v2f is the new reference baseline.
+
+**Caveat raised during analysis:**
+A tighter distribution (smaller absolute spread) can be a warning sign of *convergent training data* — if 20k games are mostly the same trajectory, an actor-critic trained on them overfits to one solution. Empirically the diversity proxies show v2f is *slightly more* diverse than v2e, not less, so this didn't materialize — but the concern motivates v2g. (See also: the `unique_triples_frac` and `top100_unique_frac` rows added to the threshold gate.)
+
+---
+
+## v2g: middle-ground exploration
+
+**Launch:** `sbatch slurm/selfplay_v2g.sh`
+**Difference from v2f:** `pb_c_base 19652 → 5000`. At 10k sims this makes `pb_c = 1.25 + log(15001/5000) = 2.35` (+88% over init), vs v2f's 1.66 (+33%) and v2e's 4.30 (+244%). Single-knob middle-ground test.
+
+**Hypothesis:** v2f's 17.8% unique-triples-fraction means the 20k games amount to ~3500 distinct training examples — thin. If we can push trajectory diversity higher (unique_triples_frac > 0.25) while retaining v2f's cost distribution (cost_median stays < 25), the middle ground is the right pick for warmstart data.
+
+**Four possible outcomes:**
+| unique_triples_frac | cost_median | Interpretation |
+|---|---|---|
+| > v2f AND cost stable (< 25) | | **adopt pb_c_base=5000** — cleanly better for training data |
+| > v2f but cost regresses (> 25) | | confirms the exploration↔exploitation tradeoff; stay with 19652, explore Dirichlet knob instead |
+| ≈ v2f | | exploration pressure isn't the diversity bottleneck; need different lever (e.g. stronger Dirichlet, or structural noise) |
+| < v2f | | less exploration helps diversity somehow (surprising) — investigate |
+
+**First wave with `reached_terminal_frac` populated.** Expect ~0.5-0.6 based on v2f's `boundary_frac=0.59` (these measure different things — `reached_terminal_frac` is strictly terminal-reaching, `boundary_frac` is any layer-transition — but the ordering should be similar).
+
+Results:
+
+*(pending)*
+
+---
+
+## v2h: middle-ground Dirichlet
+
+**Launch:** `sbatch slurm/selfplay_v2h.sh`
+**Difference from v2f:** `root_dirichlet_alpha 0.03 → 0.1`. Everything else matches v2f. Complements v2g by isolating the other exploration knob.
+
+**Factorial with v2f and v2g:**
+
+| Wave | pb_c_base | dirichlet α |
+|---|---:|---:|
+| v2f (baseline) | 19652 | 0.03 |
+| v2g | 5000 | 0.03 |
+| v2h | 19652 | 0.1 |
+
+If both v2g and v2h help diversity without regressing cost, a future v2i at (5000, 0.1) would test whether the knobs stack.
+
+**Intuition for α:** at root with `exploration_fraction=0.25`, prior = `0.75·π_net + 0.25·Dirichlet(α)` over 12 actions.
+- α=0.03: noise mass concentrated near one action. Different games boost different *single* actions.
+- α=0.1: noise spread over 2–4 actions. Different games boost different *sets* — more within-game action coverage.
+- α=0.3 (v2e): near-uniform noise; washes out prior. Regressed cost.
+
+**Hypothesis:** α=0.1 gives more trajectory diversity than 0.03 (different root-noise patterns each game → different top candidates explored → more unique trajectories) without regressing cost the way 0.3 did (which drowned the Q signal).
+
+**Primary read:** `unique_triples_frac` — the trajectory-diversity proxy. v2f sits at 0.178 (below min-viable 0.20). v2h passes if > 0.22 while `cost_median` stays < 25.
+
+Results:
+
+*(pending)*
+
+---
+
+## v2 summary (updated 2026-04-20 after v2g/v2h results)
+
+### Core empirical facts
+
+1. **Cost improves monotonically across v1 → v2f** as reward mode switches and Round-04 defaults are adopted. v1 median 32 → v2d 31 → v2e 28 → v2f **23**. v2f min 13 = Round-04 reported best of 12 + 1.
+2. **All three 10k-sim FakeNet waves (v2f / v2g / v2h) have 100% unique trajectories** at 20k games/wave — verified by hashing action sequences. Not a single repeat. My earlier `unique_triples_frac=0.178` metric was a proxy that conflated distinct trajectories with matching (cost, move_distance, noop_frac) triples; it under-counted true diversity by 5.6× on average. Conclusions about "diversity bottleneck" based on that proxy were wrong.
+3. **Earlier session's `pb_c_base=500` and `dirichlet=0.3` were regressions on every cost metric measured.** Reverted. AlphaDev's 19652 / 0.03 wins on cost (v2e vs v2f: median 28 → 23), correlations (depth~cost flipped negative), and matched on (true) trajectory diversity.
+4. **Middle-ground pb_c_base=5000 (v2g) slightly regressed cost** (median 23 → 25) without improving real diversity. Rejected.
+5. **Middle-ground dirichlet=0.1 (v2h) matched v2f on cost** with marginally better correlations (entropy~cost 0.356 → 0.380, depth~cost −0.039 → −0.067) and slightly larger top-K structural gaps. Adopted as new default going into v3.
+6. **`reached_terminal_frac ≈ 0.25` at 10k sims** on map 2 (new metric, only v2g/v2h have it). Only ~25% of simulations reach episode end — the other ~75% bottom out at leaves and get uninformed FakeNet value estimates. Value-head bypass is far from complete even at 10k sims. v2i cranks sims to 20k to test if this moves meaningfully.
+
+### What's still open (for v2i and v2j to resolve)
+
+7. **Was reward-mode switch (plan_cost → layer_delta in v2d) load-bearing in v2d → v2f?** v2d changed reward mode AND temperature, v2f reverted pb_c_base and dirichlet on top. v2j isolates reward-mode by running v2f config with `reward_mode=plan_cost`.
+8. **Does more raw sim budget push `reached_terminal_frac` up?** v2i cranks 10k → 20k sims on v2f config. If `reached_terminal_frac` goes from 0.25 to say 0.5, compute alone is enough to (partially) bypass the value head. If it stays ~0.25, selective deepening on the PV is the bottleneck, not raw compute.
+
+### Decisions locked in for v3
+
+- **`dirichlet=0.1`** as new default (from v2h).
+- **`pb_c_base=19652, pb_c_init=1.25`** stay at AlphaDev defaults (v2f confirmed these).
+- **`reward_mode=layer_delta`** provisional pending v2j (may revisit if v2j suggests plan_cost is better at 10k sims + AlphaDev defaults).
+- **τ=1.0 constant** (no per-move decay) — stays default.
+- **Random maps per game** (config `random_board=True`) in v3 — but `selfplay_worker.py` needs a port first. See `docs/selfplay/selfplay_v3.md`.
+
+### Methodology lessons
+
+- **Metric validation before conclusion.** `unique_triples_frac` was invented by me, used authoritatively, and was wrong. Going forward: new metrics are proxies until validated against ground truth (here, actual action-sequence hashing).
+- **Single-knob ablations before multi-knob changes.** v2d changed both reward_mode and temperature; v2f changed both pb_c_base and dirichlet. These entangled effects. v2g/v2h/v2j are the decomposition, and should've come first.
+- **Explicit assumption listing before implementation.** Fixed map 2 was an unflagged assumption I carried from wave 01 onward. For v3 and beyond: every proposal leads with the assumption list (see `docs/selfplay/selfplay_v3.md`).
+
+---
+
+## v2i: crank sims
+
+**Launch:** `sbatch slurm/selfplay_v2i.sh`
+**Difference from v2f:** `num_simulations 10000 → 20000`. Everything else identical to v2f (FakeNet, fixed map 2, layer_delta, `pb_c_base=19652, dirichlet=0.03`, τ=1.0). Sample size reduced to **1000 games × 5 jobs × 200 games/node** since 0% repeats was already established at 20k.
+
+**Primary question:** does `reached_terminal_frac` move meaningfully (from ~0.25 at 10k sims) when we double the sim budget?
+
+**Interpretation matrix:**
+
+| reached_terminal_frac | cost_median | Interpretation |
+|---|---|---|
+| > 0.5 | < 23 (better than v2f) | raw compute is a viable path to full-depth; 50k or 100k sims worth trying |
+| ~ 0.5 | ~ 23 | more compute reaches terminal more often but doesn't improve policy — value-head noise isn't the bottleneck |
+| ~ 0.3 | < 23 | compute helps cost via some other path (e.g. Q estimate refinement) without bypassing value head |
+| ~ 0.3 | ~ 23 | 2x compute is a no-op at this scale → selective-deepening lever, not sims budget, is the limiting factor |
+
+Results:
+
+*(pending)*
+
+---
+
+## v2j: reward-mode ablation
+
+**Launch:** `sbatch slurm/selfplay_v2j.sh`
+**Difference from v2f:** `reward_mode layer_delta → plan_cost`. Everything else identical to v2f. Sample size **1000 games × 5 jobs × 200 games/node**.
+
+**Primary question:** did v2d's reward-mode switch do load-bearing work for the v2d→v2f gains?
+
+**Interpretation:**
+
+- v2j ≈ v2f (within ~1 cost unit and 0.05 correlation): reward_mode isn't load-bearing at 10k sims + AlphaDev defaults. Either mode is fine; any future reward-mode choice should be made on other grounds (e.g. fit with a trained value head).
+- v2j regresses meaningfully (cost_median > 25, corr_root_v_cost goes positive again): layer_delta was earning its keep, stick with it.
+- v2j improves meaningfully (cost_median < 22): `plan_cost` + AlphaDev defaults is actually the right combo; v3 should revisit.
+
+**Caveat:** v2j's result is specific to fixed map 2, 10k sims, FakeNet, and AlphaDev defaults. Does not settle reward_mode in the trained-value regime or on random maps. Those are separate experiments.
 
 Results:
 

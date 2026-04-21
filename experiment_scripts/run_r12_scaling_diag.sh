@@ -21,7 +21,7 @@ $PYTHON main.py \
   --config.mcts.num_simulations=$SIMS \
   --config.mcts.root_dirichlet_alpha=$ALPHA \
   --config.mcts.root_exploration_fraction=0.25 \
-  --config.mcts.temperature_decay_steps=1000 \
+  --config.mcts.temperature_decay_moves=1000 \
   --config.mcts.temperature_final=0.25 \
   --config.training.data_augmentation=True \
   --config.env.reward_mode=layer_delta \

@@ -125,7 +125,6 @@ def main(_):
             for _ in range(5):
                 eg = Game(config, ev_tasks, ev_positions)
                 eg = play_game(eg, config.mcts, trainer.network,
-                               training_steps=trainer.network.training_steps(),
                                add_exploration_noise=False, deterministic=True)
                 ev_games.append(eg)
                 ev_costs.append(compute_solution_cost(eg))

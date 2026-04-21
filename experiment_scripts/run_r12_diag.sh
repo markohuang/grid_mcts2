@@ -22,7 +22,7 @@ $PYTHON main.py \
   --config.mcts.num_simulations=250 \
   --config.mcts.root_dirichlet_alpha=$ALPHA \
   --config.mcts.root_exploration_fraction=$FRAC \
-  --config.mcts.temperature_decay_steps=$DECAY \
+  --config.mcts.temperature_decay_moves=$DECAY \
   --config.mcts.temperature_final=$TEMP_FINAL \
   --config.training.data_augmentation=True \
   --config.env.reward_mode=layer_delta \

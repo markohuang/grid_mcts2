@@ -67,29 +67,43 @@ def get_config():
     c.mcts.num_simulations = 50
     c.mcts.discount = 1.0
     # pb_c = init + log((N_parent + base + 1) / base). At N_parent = base, log term adds
-    # log(2) ~= 0.69 on top of init. The log term grows meaningfully only when N_parent
-    # approaches `base`, and only the root ever gets close (interior nodes have much
-    # smaller parent visit counts).
-    #   AlphaDev / AlphaZero:  base=19652, init=1.25   (dead weight at <2000 sims)
-    #   lc0:                   base=38739, init=1.745  (tuned for 10k-100k tournament sims)
-    #   ours:                  base=500,   init=1.25   (engages at our 800-sim target)
-    # Growth at our setting:
-    #   N_parent=50   -> pb_c = 1.25 + 0.10 = 1.35   (+ 8%, barely perturbs smoke tests)
-    #   N_parent=800  -> pb_c = 1.25 + 0.96 = 2.21   (+77%, real exploration gain)
-    #   N_parent=2000 -> pb_c = 1.25 + 1.61 = 2.86   (+129%, headroom for further scale)
-    c.mcts.pb_c_base = 500
-    c.mcts.pb_c_init = 1.25  # sweep jointly with root_dirichlet_alpha after first HPC wave
-    # root_dirichlet_alpha: AlphaDev=0.03 (271 actions), AlphaZero chess=0.03 (~30 moves),
-    # AlphaZero shogi/Go-9x9=0.15. Our branching factor is 9-15 (empty cells on the board).
-    # 0.03 was too spiky pre-softmax-fix: noise concentrated on 1-2 cells out of 9-15.
-    # 0.3 is a safer post-fix default; sweep 0.1-1.0 after the first HPC self-play wave.
-    c.mcts.root_dirichlet_alpha = 0.3  # TODO: sweep post scale-up
+    # log(2) ~= 0.69 on top of init.
+    #   AlphaDev / AlphaZero: base=19652, init=1.25   (what we use)
+    #   lc0 training:         base=38739, init=1.745  (tuned for 10k-100k tournament sims)
+    # Growth at base=19652:
+    #   N_parent=800   -> pb_c = 1.29 (+3% over init)
+    #   N_parent=10000 -> pb_c = 1.66 (+33%)
+    #   N_parent=50000 -> pb_c = 2.63 (+110%)
+    # An earlier session tried base=500 (+244% at 10k sims) on the theory that the log term
+    # should "engage at our scale". v2e (base=500) vs v2f (base=19652) A/B with 10k sims +
+    # FakeNet + layer_delta showed 19652 wins across the board: cost median 28->23, cost min
+    # 16->13 (Round-04 optimum was 12), trajectory diversity 17.8%->17.8% (same), AND first
+    # time corr(depth,cost) flipped negative. AlphaDev's default was right.
+    c.mcts.pb_c_base = 19652  # AlphaDev/Round-04 default (see experiments/selfplay_v2f)
+    c.mcts.pb_c_init = 1.25   # AlphaDev/AlphaZero; lc0=1.745 if we want more uniform exploration
+    # root_dirichlet_alpha: AlphaDev=0.03, AlphaZero chess=0.03, Go/shogi=0.15. Our branching
+    # factor is 9-15. v2e-vs-v2f A/B showed 0.3 (very diffuse) regresses cost vs 0.03 (spiky).
+    # v2f-vs-v2h A/B (2026-04-20) showed 0.1 matches 0.03 on cost with slightly stronger
+    # correlations and larger top-K structural gaps -- adopted as default going into v3.
+    # Intuition: alpha=0.03 is near-one-hot noise (single action boost per game); alpha=0.1
+    # spreads noise across 2-4 actions per game, giving more within-game action coverage
+    # without washing out the Q signal the way 0.3 did.
+    c.mcts.root_dirichlet_alpha = 0.1  # v2h default (alpha=0.1); see docs/selfplay/selfplay_waves.md
     c.mcts.root_exploration_fraction = 0.25  # AlphaDev=0.25, AlphaZero=0.25
     c.mcts.known_bounds = ml_collections.ConfigDict({'min': -6.0, 'max': 6.0})
     c.mcts.max_moves = 10000
-    c.mcts.temperature_init = 2.0
-    c.mcts.temperature_final = 0.25
-    c.mcts.temperature_decay_steps = 1000
+    # Temperature: lc0-style per-episode linear decay (see docs/selfplay/lc0_temperature_design.md).
+    # get_temperature(move_in_episode, config) linearly interpolates from temperature_init to
+    # temperature_final over temperature_decay_moves moves, then stays at temperature_final.
+    # Setting temperature_decay_moves=0 degenerates to a constant T = temperature_init (current default,
+    # matches v2d/v2e/v2f behavior where training_steps=0 made the old schedule also effectively constant).
+    #
+    # To activate per-move decay later (lc0-style): try temperature_init=1.0, temperature_final=0.0,
+    # temperature_decay_moves=8 for 24-step episodes -> moves 0-7 decay 1.0->0, moves 8-23 argmax.
+    # Each game exposes the full E/E spectrum on its own.
+    c.mcts.temperature_init = 1.0
+    c.mcts.temperature_final = 1.0  # unused when decay_moves=0
+    c.mcts.temperature_decay_moves = 0  # 0 = constant T throughout every game (= current behavior)
     # Plan-cost heuristic mixed into MCTS prior. When > 0, _expand_node probes each legal
     # action one step on a cloned env and folds β · plan_cost_delta / cost_ub into the
     # log-prior before softmax. The heuristic then rides the usual pb_c · √(ΣN)/(1+N)

@@ -139,8 +139,7 @@ def main(_):
         eval_games, eval_costs = [], []
         for _ in range(5):
             eg = Game(config, eval_tasks, eval_positions)
-            eg = play_game(eg, config.mcts, trainer.network,
-                           training_steps=trainer.network.training_steps())
+            eg = play_game(eg, config.mcts, trainer.network)
             eval_games.append(eg)
             eval_costs.append(compute_solution_cost(eg))
         eval_cost = min(eval_costs)

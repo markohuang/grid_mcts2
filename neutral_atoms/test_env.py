@@ -350,7 +350,7 @@ class TestGameSerialization:
         from .network import Network
         net = Network(config.network, use_fake=True)
         game = Game(config, m['tasks'], initial_positions)
-        game = play_game(game, config.mcts, net, training_steps=0)
+        game = play_game(game, config.mcts, net)
         game.cache_observation()
         d = game.to_dict()
         restored = Game.from_dict(d, config.env)
@@ -367,7 +367,7 @@ class TestGameSerialization:
         from .config import map_class, map_id
         m = MAPS[1]  # 4x4 8q
         mc = map_class(m)
-        assert mc == '4x4_08q_04g_03l'
+        assert mc == '4x4_8qb_4gpl_3lyrs'
         mid = map_id(m)
         assert len(mid) == 8
         # Same map produces same id
@@ -385,7 +385,7 @@ class TestGameSerialization:
         from .network import Network
         net = Network(config.network, use_fake=True)
         game = Game(config, m['tasks'], initial_positions)
-        game = play_game(game, config.mcts, net, training_steps=0)
+        game = play_game(game, config.mcts, net)
         game.cache_observation()
         d = game.to_dict()
         import io, torch

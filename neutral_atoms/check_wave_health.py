@@ -2,7 +2,7 @@
 
 Reads a parquet-indexed dataset and reports distribution stats, correlations,
 and top-K structural gaps. Compare outputs against the thresholds in
-experiments/selfplay_waves.md to judge warmstart-readiness.
+docs/selfplay/selfplay_waves.md to judge warmstart-readiness.
 
 Usage:
   python -m neutral_atoms.check_wave_health <dataset_dir>
@@ -74,6 +74,29 @@ def _topk_gap_row(df, k=100):
     }
 
 
+def _diversity_row(df, k=100):
+    # Proxy for trajectory uniqueness: distinct (cost, move_distance, noop_frac) triples.
+    # Different action sequences almost always differ in at least one of these.
+    # Not a true trajectory hash (we don't store history in the index), but a strong lower
+    # bound on diversity -- colliding triples can hide same-trajectory duplicates, not split them.
+    triples = list(zip(df.cost, df.move_distance, df.noop_frac.round(3)))
+    unique_frac = len(set(triples)) / len(df) if len(df) > 0 else 0.0
+    top = df.nsmallest(k, 'cost')
+    top_triples = list(zip(top.cost, top.move_distance, top.noop_frac.round(3)))
+    top_unique_frac = len(set(top_triples)) / max(len(top), 1)
+    # relative cost spread: (q90 - q10) / median. Scale-invariant, handles tightening at lower
+    # absolute costs (where q90-q10 drops mechanically as the distribution floor approaches optimum).
+    median = float(df.cost.quantile(.50))
+    rel_spread = float((df.cost.quantile(.9) - df.cost.quantile(.1)) / max(median, 1))
+    return {
+        'unique_frac': float(unique_frac),
+        'top_unique_frac': float(top_unique_frac),
+        'rel_spread': rel_spread,
+        'n_trajs_at_min': int(len(set(zip(df[df.cost == df.cost.min()].move_distance,
+                                          df[df.cost == df.cost.min()].noop_frac.round(3))))),
+    }
+
+
 def _inner_row(df):
     # reached_terminal_frac may be NaN for waves generated before the metric was added (2026-04-20+).
     reached = float(df.mcts_reached_terminal_frac.mean()) if 'mcts_reached_terminal_frac' in df else float('nan')
@@ -88,18 +111,18 @@ def _inner_row(df):
     }
 
 
-# Thresholds for a wave to be "warmstart-viable". See experiments/selfplay_waves.md
+# Thresholds for a wave to be "warmstart-viable". See docs/selfplay/selfplay_waves.md
 # for rationale. Convention: (direction, min_viable, stretch)
 #   direction='low'  -> lower value is better (threshold is a ceiling)
 #   direction='high' -> higher value is better (threshold is a floor)
 #
 # NOTE: depth-related thresholds (mdepth_mean, mdepth_std) are currently calibrated
 # for map 2 (5x5_12qb_4gpl_3lyrs, 24-step episodes). They'll need re-scaling for
-# larger boards — see experiments/selfplay_waves.md §"Thresholds across map scales".
+# larger boards — see docs/selfplay/selfplay_waves.md §"Thresholds across map scales".
 THRESHOLDS = {
     'cost_median':             ('low',  25,    18),
     'cost_min':                ('low',  18,    13),
-    'cost_spread':             ('high', 8,     15),    # q90 - q10
+    'rel_cost_spread':         ('high', 0.30,  0.60),  # (q90-q10)/median; replaces absolute cost_spread
     'policy_entropy':          ('low',  1.5,   1.0),   # at tau=1; not directly comparable across tau
     'mdepth_mean':             ('high', 4.0,   5.5),
     'mdepth_std':              ('high', 0.30,  0.80),  # problem-adaptive depth; map-scale dependent
@@ -110,6 +133,11 @@ THRESHOLDS = {
     'reached_terminal_frac':   ('high', 0.50,  0.90),  # added 2026-04-20; see mcts.py
     'topk_entropy_gap':        ('high', 0.30,  0.70),  # overall - top
     'topk_depth_gap':          ('high', 0.10,  0.50),  # top - overall
+    # Training-data-quality (diversity) rows: added 2026-04-20. Proxies since we don't index
+    # trajectory hashes. unique_triples_frac > 0.20 means most of the 20k games contribute
+    # distinct training targets; much lower means heavy replication.
+    'unique_triples_frac':     ('high', 0.20,  0.40),  # wave-level diversity
+    'top100_unique_frac':      ('high', 0.80,  0.95),  # good-games diversity
 }
 
 
@@ -133,10 +161,11 @@ def _threshold_checks(df):
     topk = _topk_gap_row(df)
     inner = _inner_row(df)
 
+    div = _diversity_row(df)
     checks = [
         ('cost_median',           cost['median']),
         ('cost_min',              cost['min']),
-        ('cost_spread',           int(df.cost.quantile(.9) - df.cost.quantile(.1))),
+        ('rel_cost_spread',       div['rel_spread']),
         ('policy_entropy',        search['entropy']),
         ('mdepth_mean',           search['mdepth']),
         ('mdepth_std',            search['dstd']),
@@ -147,6 +176,8 @@ def _threshold_checks(df):
         ('reached_terminal_frac', inner['termfr']),
         ('topk_entropy_gap',      topk['entropy_gap']),
         ('topk_depth_gap',        topk['depth_gap']),
+        ('unique_triples_frac',   div['unique_frac']),
+        ('top100_unique_frac',    div['top_unique_frac']),
     ]
     return checks
 
@@ -220,6 +251,15 @@ def main():
         for name, df in dfs
     ], ['wave', 'top_cost', 'top_ent', 'all_ent', 'ent_gap', 'top_dep', 'all_dep', 'dep_gap'])
 
+    print_table('DIVERSITY (training-data quality proxy)', [
+        [name,
+         f"{_diversity_row(df)['unique_frac']:.3f}",
+         f"{_diversity_row(df)['top_unique_frac']:.3f}",
+         f"{_diversity_row(df)['rel_spread']:.3f}",
+         _diversity_row(df)['n_trajs_at_min']]
+        for name, df in dfs
+    ], ['wave', 'uniqfr', 'top_uniqfr', 'rel_spread', 'trajs_at_min'])
+
     print_table('INNER', [
         [name,
          f"{_inner_row(df)['rew_std']:.3f}",
@@ -233,7 +273,7 @@ def main():
     ], ['wave', 'rew_std', 'rew_mean', 'rew_abs', 'boundfr', 'termfr', 'signch', 'rewfrac'])
 
     # ----- threshold gate -----
-    print('\n=== THRESHOLD GATE (see experiments/selfplay_waves.md for rationale) ===')
+    print('\n=== THRESHOLD GATE (see docs/selfplay/selfplay_waves.md for rationale) ===')
     print(f"{'metric':<22} ", end='')
     for name, _ in dfs:
         print(f'{name[:15]:>17}', end='')

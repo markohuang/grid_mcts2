@@ -9,13 +9,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **`docs/pipeline.md`** — training pipeline with diagrams (feature construction, network architecture, training targets)
 4. **`docs/architecture.md`** — detailed file structure, key interfaces, hyperparameter table, device lifecycle
 5. **`docs/reward_modes.md`** — all 4 reward modes with formulas, code snippets, and results
-6. **`experiments/README.md`** → individual round docs — what's been tested, results, known bottlenecks, next steps
+6. **`docs/experiments/README.md`** → individual round docs — what's been tested, results, known bottlenecks, next steps
 
 ### Current status
 
 **Layer-level MDP** (Phase 0B complete). The "execute immediately" attractor from the old MDP is eliminated — there is no GATE_ACTION. The agent places atoms one at a time per layer, and layers auto-execute when all relevant atoms are placed. Episodes are deterministic length (`sum(k_t)` where `k_t` = relevant atoms per layer). Action space = `board_size` (~12-25) instead of the old `1 + Q * board_size` (~129). 100% completion rate by construction.
 
-Rounds 04/04b validated the new MDP (Map 1 best=7, near lower bound of 6; Map 2 best=12 on 5×5). Round 05 is exploring specialist vs generalist training on 8×8 maps (Maps 3/4). See `experiments/README.md` for the full experiment index.
+Rounds 04/04b validated the new MDP (Map 1 best=7, near lower bound of 6; Map 2 best=12 on 5×5). Round 05 is exploring specialist vs generalist training on 8×8 maps (Maps 3/4). See `docs/experiments/README.md` for the full experiment index.
 
 ## Setup
 
@@ -153,7 +153,7 @@ Total cost metric = reconfig parallel groups + gate execution groups (2x per lay
 
 ## Experiments
 
-Experiment logs live in `experiments/`. Each round is a standalone markdown with hypotheses, exact reproducible commands, results, and analysis. See `experiments/README.md` for the index.
+Experiment logs live in `docs/experiments/` and `experiment_scripts/`. Each round is a standalone markdown with hypotheses, exact reproducible commands, results, and analysis. See `docs/experiments/README.md` for the index.
 
 ```bash
 # Custom single run

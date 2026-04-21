@@ -53,7 +53,7 @@ For the current maps (3 layers, 4-8 gates/layer), this is fast enough. For large
 
 ### Phase 1: Validate (Round 04) — immediate next
 
-Run the experiments in `experiments/04_layer_mdp_validation.md`:
+Run the experiments in `docs/experiments/04_layer_mdp_validation.md`:
 1. MCTS-only baseline (FakeNet, varying sims)
 2. Learning baseline (20 epochs, Map 0 and Map 1)
 3. Simulation count comparison

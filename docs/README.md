@@ -23,10 +23,10 @@
 
 ## Experiments
 
-See [experiments/README.md](../experiments/README.md) for the full round-by-round index.
+See [docs/experiments/README.md](./experiments/README.md) for the full round-by-round index.
 
 Key rounds:
-- [R07](../experiments/07_generalist_and_reward_modes.md) — Reward mode shootout (plan_cost vs layer_delta vs layer_completion)
-- [R08](../experiments/08_reward_signal_error_modes.md) — layer_delta + search bonus discovery
-- [R10](../experiments/10_convergence_and_scaling.md) — Convergence studies, sequential specialist, architecture analysis
-- [R11](../experiments/11_architecture_validation.md) — **Current**: Transformer + cross-positional features validation
+- [R07](./experiments/07_generalist_and_reward_modes.md) — Reward mode shootout (plan_cost vs layer_delta vs layer_completion)
+- [R08](./experiments/08_reward_signal_error_modes.md) — layer_delta + search bonus discovery
+- [R10](./experiments/10_convergence_and_scaling.md) — Convergence studies, sequential specialist, architecture analysis
+- [R11](./experiments/11_architecture_validation.md) — **Current**: Transformer + cross-positional features validation

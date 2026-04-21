@@ -52,7 +52,7 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions,
     net.eval()
     t0 = time.time()
     game = Game(config, tasks, initial_positions)
-    game = play_game(game, config.mcts, net, training_steps=training_steps)
+    game = play_game(game, config.mcts, net)
     game_time = time.time() - t0
     return game, game_time
 

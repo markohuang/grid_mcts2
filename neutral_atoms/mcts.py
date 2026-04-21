@@ -13,13 +13,16 @@ if TYPE_CHECKING:
 MAXIMUM_FLOAT_VALUE = float('inf')
 
 
-def get_temperature(steps, config):
+def get_temperature(move_in_episode, config):
+    # lc0-style per-move linear decay (see docs/selfplay/lc0_temperature_design.md).
+    # Every episode runs the same envelope from move 0, independent of training state.
+    # Setting temperature_decay_moves=0 degenerates to a constant T = temperature_init.
     t_init = config.temperature_init
     t_final = config.temperature_final
-    decay_steps = config.temperature_decay_steps
-    if steps >= decay_steps:
-        return t_final
-    alpha = steps / decay_steps
+    decay_moves = config.temperature_decay_moves
+    if decay_moves <= 0 or move_in_episode >= decay_moves:
+        return t_final if decay_moves > 0 else t_init
+    alpha = move_in_episode / decay_moves
     return t_init + alpha * (t_final - t_init)
 
 
@@ -58,7 +61,7 @@ class MinMaxStats:
 # ---- MCTS Algorithm ----
 
 def play_game(game: Game, config, network: Network,
-              *, training_steps: int,
+              *,
               add_exploration_noise: bool = True,
               deterministic: bool = False,
               temperature_override: float | None = None) -> Game:
@@ -79,7 +82,7 @@ def play_game(game: Game, config, network: Network,
 
         run_mcts(config, root, game.history, network, min_max_stats, game.environment)
         action = _select_action(
-            training_steps, root, config, game.action_space_size,
+            len(game.history), root, config, game.action_space_size,
             deterministic=deterministic, temperature_override=temperature_override,
         )
         game.cache_observation()
@@ -169,7 +172,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
     root._mcts_sign_changes_mean = total_sign_changes / num_sims
 
 
-def _select_action(training_steps, node, config, action_space_size,
+def _select_action(move_in_episode, node, config, action_space_size,
                    deterministic=False, temperature_override=None):
     assert node.children, "_select_action called on node with no children"
     visit_counts = [
@@ -179,7 +182,7 @@ def _select_action(training_steps, node, config, action_space_size,
     if deterministic:
         _, action = max(visit_counts)
         return action
-    t = temperature_override if temperature_override is not None else get_temperature(training_steps, config)
+    t = temperature_override if temperature_override is not None else get_temperature(move_in_episode, config)
     return _softmax_sample(visit_counts, t, action_space_size)
 
 
