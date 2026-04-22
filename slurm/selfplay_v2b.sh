@@ -11,7 +11,7 @@
 #   N_parent=2000 -> pb_c = 1.25 + log(2501/500) = 1.25 + 1.61 = 2.86 (+129% over init)
 # Tests whether deeper search improves discovered solutions on the same map.
 # Everything else matches v1: random-init real network, map 2 (5x5 12qb), 20k games.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02b_2000sims}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02b_2000sims}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

@@ -20,7 +20,7 @@
 #   (our current failure mode: uniform BFS, tiny depth-std, no top-K gap).
 #
 # Clean A/B: only the two suspect config knobs change from v2e.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02f_reverted}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02f_reverted}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

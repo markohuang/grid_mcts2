@@ -41,6 +41,13 @@ MAPS = [
         'tasks': None,
         '_generator': {'seed': 42, 'num_layers': 5, 'gates_per_layer': 15},
     },
+    {   # MAPS[5]: 8x8 with 20 atoms, 5 layers, 6 gates/layer (sparser than MAPS[3]).
+        # Used as the v4 structure template for random_board=True (fresh map per game).
+        'board_dim': (8, 8), 'num_qubits': 20,
+        'atom_map': None,
+        'tasks': None,
+        '_generator': {'seed': 42, 'num_layers': 5, 'gates_per_layer': 6},
+    },
 ]
 
 
@@ -57,7 +64,28 @@ def get_config():
 
     c.env = ml_collections.ConfigDict()
     c.env.reward_scale = 1.0
-    c.env.reward_mode = 'plan_cost'  # 'plan_cost', 'layer_delta', 'layer_completion', 'remaining_cost'
+    # Reward mode. Confirmed winner (2026-04-21): plan_cost.
+    #   v2j A/B on fixed map 2 (10k sims, FakeNet, AlphaDev defaults):
+    #     plan_cost  -> cost min=12 (= Round-04 best), median=21
+    #     layer_delta -> cost min=13, median=23
+    #   v3a A/B on random 5x5 maps (same config):
+    #     plan_cost  -> cost min=12, median=22
+    #     layer_delta -> cost min=14, median=24
+    #   Two independent wins on cost distribution AND correlations; plan_cost also reaches
+    #   terminal more often (0.33 vs 0.25), has stronger corr(depth,cost) (-0.30 vs -0.12),
+    #   and runs ~32% faster per game (more sims skip NN inference at terminal leaves).
+    #
+    # Alternatives to test (especially once value head is trained):
+    #   'layer_delta'      - per-layer cost deltas. Gives broader policy targets (entropy 1.84 vs
+    #                        plan_cost's 1.28). May be preferable for cold-start training where the
+    #                        NN needs more policy-distribution signal per state. Not tested with
+    #                        trained value head yet — may outperform plan_cost there.
+    #   'layer_completion' - sparse reward at layer boundaries only. Never formally A/B-tested.
+    #   'remaining_cost'   - -cost/episode_length each step (dense reward envelope). Never A/B-tested.
+    #
+    # Also: `c.mcts.prior_mix_weight` (see below) is a complementary heuristic that only works
+    # with reward_mode='layer_delta' (fail-fast assertion against plan_cost + prior_mix).
+    c.env.reward_mode = 'plan_cost'
     c.env.entropy_weight = 0.0  # tie-breaker: adds entropy_weight * within_group_entropy to cost (0 = off)
     c.env.track_plan_delta = False  # expose plan_cost delta in step info for diagnostics / MCTS heuristics
 

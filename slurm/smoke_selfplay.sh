@@ -10,7 +10,7 @@
 # --- Smoke-test configuration ---
 # Goal: verify slurm integration, concurrent parquet shard writes, lineage fields,
 # diagnostics passthrough. NOT a real self-play wave. Dataset is scratch, discard after.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/smoke01}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/smoke01}
 WEIGHTS_PATH=${WEIGHTS_PATH:-""}    # empty = random-init real network (fakenet via --config.use_fake=True)
 MAP_NUM=${MAP_NUM:-2}               # 2 = 5x5 12qb (smallest real map)
 GAMES_PER_NODE=${GAMES_PER_NODE:-120}   # 2 games/worker across 62 workers

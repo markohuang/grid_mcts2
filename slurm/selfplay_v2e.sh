@@ -19,7 +19,7 @@
 # Expected runtime (extrapolated from v2a 10.5s/game at 800 sims):
 #   ~130s/game at 10k sims (12.5x sim count) => ~35 min/worker at 16 games/worker
 #   --time=01:00:00 gives plenty of buffer for tree-growth overhead non-linearity.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02e_deepfull}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02e_deepfull}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

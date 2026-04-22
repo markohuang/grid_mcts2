@@ -21,7 +21,7 @@
 #
 # Caveat: result is specific to 10k sims / FakeNet / map 2. Doesn't generalize to trained-value
 # regimes or random maps without further testing.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02j_plancost}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02j_plancost}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-200}
 NUM_WORKERS=62

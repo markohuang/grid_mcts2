@@ -28,7 +28,7 @@
 # like 0.3 did. Primary read: unique_triples_frac (target > 0.20).
 #
 # Includes reached_terminal_frac metric (added post-v2f).
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02h_dir0.1}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02h_dir0.1}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

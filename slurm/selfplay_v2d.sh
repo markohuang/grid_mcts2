@@ -16,7 +16,7 @@
 #      depth-3 trees. layer_delta returns per-layer delta -> sharper within-layer
 #      Q discrimination at depth 2-3, where our 800-sim trees bottom out.
 # Everything else matches v1: 800 sims, random-init real network, map 2, 20k games.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02d_temp_layerdelta}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02d_temp_layerdelta}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

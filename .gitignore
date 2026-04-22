@@ -60,3 +60,6 @@ exploration.ipynb
 
 
 data_selfplay/
+pipelines/
+*.pt
+smoke_bootstrap/

@@ -21,7 +21,7 @@
 #     plan_cost wins on map 2 at this config. Whether it holds on random maps is the test.
 #
 # Paired with v3b (identical but reward_mode=layer_delta). Direct A/B on random maps.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave03a_rnd_plancost}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave03a_rnd_plancost}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

@@ -10,7 +10,7 @@
 # v2a: FakeNet (uniform policy, zero value) vs v1's random-init real network.
 # Controlled comparison for "does the random-init NN add any signal over uniform?"
 # Everything else matches v1: 800 sims, map 2 (5x5 12qb), 20k games.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02a_fakenet}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02a_fakenet}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

@@ -8,7 +8,7 @@
 #SBATCH --output=slurm/logs/selfplay_%A_%a.out
 
 # --- Configuration (edit these) ---
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave01}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave01}
 WEIGHTS_PATH=${WEIGHTS_PATH:-""}    # empty = random init / fakenet per preset
 MAP_NUM=${MAP_NUM:-2}               # 2 = 5x5 12qb (see MAPS in config.py)
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}

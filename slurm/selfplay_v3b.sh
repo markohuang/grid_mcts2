@@ -16,7 +16,7 @@
 # Only difference from v3a: reward_mode=layer_delta (instead of plan_cost).
 # On fixed map 2 at this config, layer_delta gave v2f's cost median=23 vs plan_cost
 # v2j's 21. v3a/v3b test whether that ordering holds on random maps or flips.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave03b_rnd_layerdelta}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave03b_rnd_layerdelta}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

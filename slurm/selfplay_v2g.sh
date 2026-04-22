@@ -25,7 +25,7 @@
 #
 # NOTE: v2g includes the new reached_terminal_frac metric (added post-v2f).
 # Dirichlet alpha stays at the (now-reverted) 0.03 default -- only one knob at a time.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02g_pbc5000}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02g_pbc5000}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

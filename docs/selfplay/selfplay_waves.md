@@ -132,7 +132,7 @@ All three hold map, commit, NN init, sim budget (except v2b), and game count con
 
 **Launch:** `sbatch slurm/selfplay_v1.sh`
 **Knobs:** 800 sims, random-init real network, dirichlet_alpha=0.3, pb_c_base=500, pb_c_init=1.25, reward_mode=plan_cost, prior_mix_weight=0.0.
-**Dataset:** `/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave01` (20k games, 480k transitions, 340 batch files)
+**Dataset:** `/scratch/huang651/grid_mcts2/datasets/wave01` (20k games, 480k transitions, 340 batch files)
 
 ### Results (wave01, 2026-04-21)
 
@@ -556,7 +556,7 @@ Both reward modes go to v3.
 from neutral_atoms.data import query_index, dataset_stats
 
 # replace with the wave's dataset path
-ds = '/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02a_fakenet'
+ds = '/scratch/huang651/grid_mcts2/datasets/wave02a_fakenet'
 dataset_stats(ds)
 df = query_index(ds)
 
@@ -570,7 +570,7 @@ print('mcts_depth: mean=', df.mcts_depth.mean())
 
 # compare two waves via DuckDB
 from neutral_atoms.data import query_index
-df_v1 = query_index('/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave01')
-df_v2a = query_index('/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02a_fakenet')
+df_v1 = query_index('/scratch/huang651/grid_mcts2/datasets/wave01')
+df_v2a = query_index('/scratch/huang651/grid_mcts2/datasets/wave02a_fakenet')
 # ... compare df_v1.cost vs df_v2a.cost, etc.
 ```

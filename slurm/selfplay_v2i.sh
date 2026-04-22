@@ -16,7 +16,7 @@
 # Smaller sample (1000 games vs 20000) is deliberate: 0% repeat rate already established at 20k,
 # correlations have SE~0.03 at n=1000 (enough to distinguish meaningful effects), cost
 # distribution shape resolves at 1-unit precision. Saves ~75% of compute.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02i_20ksims}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02i_20ksims}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-200}
 NUM_WORKERS=62

@@ -10,8 +10,8 @@ Usage:
 
 Example:
   python -m neutral_atoms.check_wave_health \\
-    /project/rrg-aspuru/huang651/grid_mcts2/datasets/wave01 \\
-    /project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02d_temp_layerdelta
+    /scratch/huang651/grid_mcts2/datasets/wave01 \\
+    /scratch/huang651/grid_mcts2/datasets/wave02d_temp_layerdelta
 """
 
 import math

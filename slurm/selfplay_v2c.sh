@@ -12,7 +12,7 @@
 # across root children. Tests whether the wave01 entropy (median 2.24 of ~2.48 max)
 # has room to broaden via root-noise alone, without touching pb_c_init or sim count.
 # Everything else matches v1: 800 sims, random-init real network, map 2, 20k games.
-DATASET_DIR=${DATASET_DIR:-/project/rrg-aspuru/huang651/grid_mcts2/datasets/wave02c_explore}
+DATASET_DIR=${DATASET_DIR:-/scratch/huang651/grid_mcts2/datasets/wave02c_explore}
 MAP_NUM=${MAP_NUM:-2}
 GAMES_PER_NODE=${GAMES_PER_NODE:-1000}
 NUM_WORKERS=62

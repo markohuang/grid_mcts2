@@ -84,3 +84,48 @@ After v2j showed plan_cost > layer_delta on fixed map 2, reward_mode became an o
 | 5 | End-to-end smoke test | ✅ | 6-game run produced 6 distinct `map_id`s, 1 `map_class` |
 
 **Ready to launch v3a and v3b.**
+
+---
+
+## v3 results (wave03a_rnd_plancost, wave03b_rnd_layerdelta — 2026-04-21)
+
+### Side-by-side
+
+| Metric | v3a (plan_cost) | v3b (layer_delta) | Δ |
+|---|---:|---:|---:|
+| n games | 19176¹ | 20000 | — |
+| cost min / q10 / median / q75 / max | **12** / 19 / **22** / 24 / 33 | 14 / 20 / 24 / 26 / 34 | v3a better every quantile |
+| cost mean | **22.10** | 23.81 | −1.71 |
+| mcts_depth mean / std | **4.87** / **0.235** | 4.43 / 0.095 | v3a deeper, more problem-adaptive |
+| policy_entropy median | 1.282 | 1.844 | v3a more exploitative |
+| `corr(depth, cost)` | **−0.301** | −0.115 | v3a depth much more predictive |
+| `corr(entropy, cost)` | +0.382 | +0.350 | similar |
+| `corr(root_v, cost)` | −0.055 | −0.122 | — |
+| `reached_terminal_frac` | **0.329** | 0.247 | v3a bypasses value head 33% more |
+| top-100 depth gap | **+0.311** | +0.054 | v3a: good games searched much deeper |
+| game_time | **176s** | 246s | v3a 32% faster (more terminal reach → fewer NN calls) |
+| unique trajectories (ground truth) | **19176 (100%)** | 20000 (100%) | both maxed |
+| unique maps (ground truth) | **19176 (100%)** | 20000 (100%) | random_board working |
+
+¹ v3a had ~10 of 20 array tasks hit the `--time=01:30:00` wall before writing final summaries. Partial batches still made it into the parquet index, yielding 19176 games (95.9%). Per-game time was 176s (faster than v2f), so most jobs should have finished — something node-dependent (hardware variance?) caused straggling. **Future 8×8+ waves need generous wall time.** The dataset is still usable; the correlations/stats are based on a large sample.
+
+### Key findings
+
+1. **plan_cost beats layer_delta on random maps.** Cost distribution shifted down by 1–2 across every quantile. Replicates v2j's result on a different map distribution. Two independent wins for plan_cost; reasonable to adopt as default in `config.py` pending user approval.
+2. **v3a shows the strongest search-quality signals across all waves.** `corr(depth, cost)=−0.301`, top-100 depth gap +0.311, mcts_depth_std=0.235 (all > stretch thresholds on this axis). Search is genuinely problem-adaptive on random maps.
+3. **Random maps not much harder than fixed map 2.** v3a median 22 vs v2j median 21; v3b median 24 vs v2f median 23. Map generator preserves difficulty class, as intended.
+4. **`reached_terminal_frac` is reward-mode dependent.** plan_cost→0.33, layer_delta→0.25 on same compute budget. Plan_cost's Q-signal is apparently sharper, so UCB commits to PV faster, reaching terminal more often per sim.
+5. **100% uniqueness on both maps and trajectories.** Random_board port is correct. No duplication concern at this scale.
+
+### What's NOT concluded
+
+- **plan_cost wins with a trained value head** — untested. Training could change the picture.
+- **v3a is warmstart-optimal** — can't assess without a training run.
+- **8×8 will behave similarly** — structure class matters; bigger boards may tilt the reward-mode comparison.
+
+### Status going into v4
+
+- v3a is the current reference data for first training pass (when training pipeline lands).
+- Config default switch (plan_cost) deferred; v4 slurm explicitly sets it.
+- v3b retained as an A/B comparison dataset for later training.
+- Wall-time lesson: larger-board waves need substantially more headroom than per-game estimates suggest. Node-hardware variance is real.

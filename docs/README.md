@@ -8,6 +8,10 @@
 - [mcts_selfplay_diagnostics_v2.md](mcts_selfplay_diagnostics_v2.md) — **Current.** MCTS/self-play critical read (HEAD `75a8498`), hyperparameter health checklist, scaling blockers, and logging plan for AC dataset
   - [mcts_selfplay_diagnostics.md](mcts_selfplay_diagnostics.md) — v1 (kept as changelog; v1 flagged issues that were already fixed on HEAD — see v2 §0 for the diff)
 
+## MCTS algorithm proposals
+
+- [gumbel_pczero_plan.md](gumbel_pczero_plan.md) — Gumbel AlphaZero + PCZero literature summary and 2×2 ablation plan (control / A=Gumbel / B=PCZero / AB) against `selfplay_v3.md` baseline
+
 ## Reward modes
 
 - [reward_modes.md](reward_modes.md) — **All 4 active reward modes**: plan_cost, layer_delta, layer_delta+search_bonus, layer_completion. Formulas, code snippets, properties, and results
