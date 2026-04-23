@@ -139,6 +139,29 @@ def get_config():
     # 'layer_delta' (plan_cost mode already puts the same delta into the reward/value
     # target; stacking both would double-count). Auto-enables env.track_plan_delta.
     c.mcts.prior_mix_weight = 0.0
+    # fast_mcts backend knobs (read by fast_mcts/search.py; classic backend ignores them).
+    # backend='classic' → neutral_atoms.mcts.play_game (default, unchanged behaviour).
+    # backend='fast'    → fast_mcts.search.play_game (leaf-gather + virtual loss, Phase 1).
+    # nn_batch_size and virtual_loss only take effect when backend='fast'.
+    # Pairing rationale: without VL, 32 leaves descend greedily and mostly collide on the
+    # same unexpanded node (UCB doesn't update until backup). VL=1.0 forces them onto
+    # different branches, so batch=32 actually fills the batch. bench shows 4.8× at this
+    # pairing; 5.35× at batch=32/vl=1.5. Classic is sequential and never uses VL at all.
+    c.mcts.backend = 'classic'
+    c.mcts.nn_batch_size = 32   # leaves gathered per NN call (fast backend only)
+    c.mcts.virtual_loss = 1.0   # subtracted from value_sum on in-flight paths (fast backend only)
+
+    # Gumbel AlphaZero (docs/gumbel_pczero_plan.md). When enabled, replaces root Dirichlet +
+    # pUCT with Gumbel-Top-m + sequential halving, and non-root pUCT with the deterministic
+    # improved-policy rule (argmax_a [π'(a) - N(a)/(1+ΣN)]). Policy target becomes π' (guaranteed
+    # improvement) instead of softmax-of-visits.
+    #   num_samples_m=0 => auto-set to num_legal = board_size - num_qubits + 1 in set_derived_config.
+    #   c_visit / c_scale: σ(q_norm) = (c_visit + max_N) * c_scale * q_norm. Paper defaults.
+    c.mcts.gumbel = ml_collections.ConfigDict()
+    c.mcts.gumbel.enabled = False
+    c.mcts.gumbel.num_samples_m = 0
+    c.mcts.gumbel.c_visit = 50.0
+    c.mcts.gumbel.c_scale = 1.0
 
     c.training = ml_collections.ConfigDict()
     c.training.epochs = 50
@@ -222,6 +245,11 @@ def set_derived_config(config):
         config.env.max_atoms_per_layer = max(
             len({q for pair in layer for q in pair}) for layer in tasks
         )
+        # Gumbel num_samples_m defaults to legal-action count (constant per map:
+        # board_size - num_qubits + 1 since every step has num_qubits occupied cells,
+        # and legal = [current_cell] + [empty cells]). See board.py:get_legal_actions_for_qubit.
+        if config.mcts.gumbel.num_samples_m == 0:
+            config.mcts.gumbel.num_samples_m = board_size - num_qubits + 1
 
 
 def get_map_data(config):

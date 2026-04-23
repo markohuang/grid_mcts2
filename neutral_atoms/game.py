@@ -58,22 +58,30 @@ class Game:
             self.latency_reward = -move_dist / max(len(self.history), 1)
 
     def store_search_statistics(self, root):
-        tau = self.policy_target_temperature
-        if tau == 1.0:
-            sum_visits = sum(child.visit_count for child in root.children.values())
+        gumbel_policy = getattr(root, '_gumbel_policy', None)
+        if gumbel_policy is not None:
+            # Guaranteed-improvement target π' from Gumbel AlphaZero (bypasses τ — π' is already
+            # a proper training distribution; temperature doesn't apply).
             self.child_visits.append([
-                root.children[a].visit_count / sum_visits if a in root.children else 0
-                for a in range(self.action_space_size)
+                gumbel_policy.get(a, 0.0) for a in range(self.action_space_size)
             ])
         else:
-            log_visits = {a: math.log(child.visit_count + 1e-8) / tau
-                          for a, child in root.children.items()}
-            max_log = max(log_visits.values())
-            exp_visits = {a: math.exp(v - max_log) for a, v in log_visits.items()}
-            exp_sum = sum(exp_visits.values())
-            self.child_visits.append([
-                exp_visits.get(a, 0) / exp_sum for a in range(self.action_space_size)
-            ])
+            tau = self.policy_target_temperature
+            if tau == 1.0:
+                sum_visits = sum(child.visit_count for child in root.children.values())
+                self.child_visits.append([
+                    root.children[a].visit_count / sum_visits if a in root.children else 0
+                    for a in range(self.action_space_size)
+                ])
+            else:
+                log_visits = {a: math.log(child.visit_count + 1e-8) / tau
+                              for a, child in root.children.items()}
+                max_log = max(log_visits.values())
+                exp_visits = {a: math.exp(v - max_log) for a, v in log_visits.items()}
+                exp_sum = sum(exp_visits.values())
+                self.child_visits.append([
+                    exp_visits.get(a, 0) / exp_sum for a in range(self.action_space_size)
+                ])
         self.root_values.append(root.value())
         self.mcts_depths.append(getattr(root, '_mcts_avg_depth', 0))
         self.mcts_reward_fracs.append(getattr(root, '_mcts_reward_frac', 0))

@@ -30,7 +30,7 @@ from neutral_atoms.config import (
 )
 from neutral_atoms.network import Network
 from neutral_atoms.game import Game
-from neutral_atoms.mcts import play_game
+from fast_mcts.backends import get_backend
 from neutral_atoms.data import save_game_batch, save_map_spec, save_manifest, atomic_save, append_index
 from neutral_atoms.experiment import compute_solution_cost, _git_metadata
 
@@ -67,7 +67,7 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions,
         initial_positions = atom_map_to_positions(m['atom_map'], config.env.board_width)
     t0 = time.time()
     game = Game(config, tasks, initial_positions)
-    game = play_game(game, config.mcts, net)
+    game = get_backend(config.mcts.backend)(game, config.mcts, net)
     game_time = time.time() - t0
     return game, game_time
 

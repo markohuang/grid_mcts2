@@ -3,7 +3,9 @@
 #SBATCH --account=rrg-aspuru
 #SBATCH --array=0                  # single job — pure calibration
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=32G
+#SBATCH --mem=96G                  # 5x5 at 10k sims used ~32G; 8x8 at 20k OOM'd on 32G (job 59728979).
+                                   # Bumped to 96G: ~1.5GB/worker headroom at 62 workers. If still OOMs,
+                                   # reduce NUM_WORKERS to 30 rather than bump further.
 #SBATCH --time=02:00:00            # 2h ceiling; abort early if per-game runs long
 #SBATCH --output=slurm/logs/selfplay_v4_smoke_%A_%a.out
 

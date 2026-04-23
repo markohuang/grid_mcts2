@@ -209,14 +209,38 @@ Until then: both variants stay behind `enabled: False` flags, default behaviour 
 
 ---
 
-## 9. Open questions to resolve before Phase 1
+## 9. Decisions (resolved before implementation)
 
-1. **Gumbel `m` sizing.** Paper uses `m = min(num_simulations, num_actions)` in the limit; our `legal_actions` varies per step. Confirm a single config knob suffices or we need `m` as a function of step.
-2. **Gumbel non-root discount.** Paper assumes undiscounted or discount folded into value. Our `discount < 1` and we have per-step dense rewards; verify `completedQ(a) = r(a) + γ·V(s')` matches paper convention.
-3. **PCZero window across trajectory boundaries.** Batches mix states from different trajectories; window must not cross game boundaries. Enforce via `trajectory_id` mask.
-4. **Value bins interaction with PCZero.** We use categorical value heads (`scalar_to_two_hot`). `L_PC` should operate on `logits2values(correctness_logits)` (scalar mean), not on logits directly. Confirm before implementation.
+1. **Gumbel `m` sizing — RESOLVED.** Legal-action count is *constant* within a map: `num_legal = board_size − num_qubits + 1` (14 on 5×5/12qb, 45 on 8×8/20qb; verified by `board.py:get_legal_actions_for_qubit`, since board occupancy count is invariant across steps). Set `m = num_legal` as a single per-map int, computed in `set_derived_config`. No per-step adaptation needed.
+2. **Discount — RESOLVED.** `config.mcts.discount = 1.0` already (`config.py:96`), episode length is deterministic. `completedQ(a) = r(a) + V(s')` (γ drops out). No new Gumbel-specific discount knob; inherit `mcts.discount`.
+3. **PCZero formulation — RESOLVED (PC-bellman variant).** The paper's literal `L_PC = (v − v̄_W)²` assumes `v*` is constant on optimal paths (true for sparse-reward Hex/Go). In our dense-reward plan_cost MDP `v*(s_t)` decreases monotonically as remaining cost shrinks, so the literal form would penalize the correct shape. Use **PC-bellman**: `L_PC(s_t) = (r_t + γ·v(s_{t+1}) − v(s_t))²`. This reduces to the paper's formulation when rewards are terminal-only (Hex, Go), matches the actual Bellman invariant for our γ=1 dense-reward case, and is pairwise — no windowing complication.
+4. **Value head for PCZero — RESOLVED.** Correctness head only (latency is a terminal scalar with no path structure). Compute `v(s)` as `logits2values(correctness_logits)` scalar expectation, then apply PC-bellman. Do not apply PC to categorical logits directly.
+5. **Trajectory boundary guard — RESOLVED.** Batches must carry a per-sample `next_in_trajectory` flag so PC-bellman only fires on pairs from the same game. Surface via a new bool field in the TensorDict batch.
 
-These go into Phase 1's smoke-test checklist; they're not blockers for writing the plan but they are blockers for writing the first PR.
+These five decisions update §4 (control variables), §5 (rollout), and §8 (implementation surface) — see the corresponding sections for the live spec.
+
+---
+
+## 10. Implementation status and first smoke (2026-04-23)
+
+**Landed:**
+- `config.py` — added `c.mcts.gumbel = {enabled, num_samples_m, c_visit, c_scale}`; `set_derived_config` auto-derives `num_samples_m = board_size − num_qubits + 1` when unset.
+- `mcts.py` — `Node.network_value` added; `_expand_node` saves it; `_backpropagate` tolerates `min_max_stats=None`; `play_game` dispatches to `_gumbel_plan` when `gumbel.enabled`. New helpers: `_gumbel_plan`, `_gumbel_simulate`, `_gumbel_non_root_select`, `_gumbel_completed_q`, `_gumbel_improved_policy`, `_gumbel_halving_scores`.
+- `game.py` — `store_search_statistics` uses `root._gumbel_policy` as the training target when present; falls back to softmax-of-visits otherwise.
+- `scripts/smoke_gumbel.py` — asserts invariants (episode length, policy-target distribution, stats populated) plus a pUCT-vs-Gumbel side-by-side.
+
+**Phase 1 smoke result (`scripts/smoke_gumbel.py`, FakeNet, MAPS[2] 5×5/12qb, 64 sims, 4 games/variant):**
+
+| Variant | Costs | Mean | Lengths |
+|---|---|---:|---|
+| pUCT control | [33, 35, 35, 31] | 33.50 | [24, 24, 24, 24] |
+| **Gumbel** | [14, 14, 14, 15] | **14.25** | [24, 24, 24, 24] |
+
+MAPS[2] known lower bound is 12 (Round-04). At 64 sims Gumbel is within 2-3 of optimum while pUCT is at ~2.8× the lower bound. This is the paper's headline regime (tight `sims/actions` ratio: 64/14 = 4.6). Gates passed: 100% episode completion, policy targets are proper distributions, no crash on either variant.
+
+**What the smoke does NOT prove:** only 4 games, fixed MAPS[2] (not random), FakeNet (not trained net), 64 sims (not 10k). Production behaviour at 10k-sim wave scale is still open — that's Phase 2. The smoke's purpose was correctness + tight-budget sanity, both of which pass.
+
+**Next:** Phase 2 (full A ablation wave, v3a-shape: 20k games, random MAPS[2], 10k sims, 20 jobs × 1000). Slurm script pending.
 
 ---
 
