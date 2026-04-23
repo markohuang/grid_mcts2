@@ -61,6 +61,11 @@ def get_config():
     c.use_fake = False
     c.random_board = False  # if True, generate random board each game
     c.random_board_seed = -1  # -1 = different seed each game
+    # Device for network inference inside selfplay workers ('cpu' or 'cuda').
+    # 'cpu' is always safe (default). 'cuda' moves the real net to GPU inside each
+    # subprocess — use with num_workers small enough to fit N CUDA contexts in VRAM
+    # (each context ~200-400 MB overhead beyond model weights; 4 workers is safe on A100).
+    c.selfplay_device = 'cpu'
 
     c.env = ml_collections.ConfigDict()
     c.env.reward_scale = 1.0

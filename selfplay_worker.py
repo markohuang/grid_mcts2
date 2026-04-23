@@ -51,6 +51,8 @@ def _play_single_game(state_dict, config_dict, tasks, initial_positions,
     if not use_fake and state_dict is not None:
         net.load_state_dict(state_dict)
     net.eval()
+    if not use_fake and config.selfplay_device != 'cpu':
+        net = net.to(config.selfplay_device)
     # If random_board is on, regenerate a fresh map for THIS game only. Each worker
     # draws independently; truly random per call when random_board_seed=-1.
     if config.random_board:
