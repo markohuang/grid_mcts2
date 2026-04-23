@@ -77,6 +77,8 @@ squeue -u huang651 | grep pipe_              # active jobs
 | [v2f01](v2f01.md) | 2026-04-21 | wave02f_reverted (20k FakeNet, map 2 fixed) | 1 | Pretrained net hit cost **10** on fixed map 2 (prior best 12). Avg 23→17 (−27%). |
 | [v3a01](v3a01.md) | 2026-04-22 → 04-23 | wave03a_rnd_plancost (19k FakeNet, random 5x5) | 5 | Avg cost 22.1 → **12.99** (−41%). Min cost **8** on random boards. Monotonic improvement across cycles. |
 
+| [v3a_fast](v3a_fast.md) | 2026-04-23 → | v3a01 cycle_05 ckpt | TBD | fast_mcts (batch=32, vl=1.0) on 5×5 random boards; smoke + ablation series |
+
 ## Failure modes seen in practice
 
 - **Shared inode quota (`/project/rrg-aspuru`, 500K limit across all group members)** — v2f01's first attempt crashed at ~498K inodes. Fix: moved all experiment data to `/scratch/huang651` (1M-inode personal quota). See also [project_storage_layout.md](../../memory/...) in memory.

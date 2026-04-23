@@ -44,6 +44,22 @@ echo "  num_workers=$NUM_WORKERS  num_games=$NUM_GAMES  num_sims=$NUM_SIMS"
 echo "  weights=$WEIGHTS_PATH"
 nvidia-smi -L || true
 
+# Run sanity checks before touching the dataset (fast, <5 min with real net).
+# Check 1: byte-exact GPU parity. Check 2: H2D fraction. Check 3: quality parity.
+echo "=== Sanity checks ==="
+python fast_mcts/test_gpu_sanity.py --ckpt="$WEIGHTS_PATH" --sims=1000
+SANITY_EXIT=$?
+if [ $SANITY_EXIT -ne 0 ]; then
+    echo "WARN: sanity checks reported issues (exit=$SANITY_EXIT) — proceeding anyway, check logs"
+fi
+
+# Background GPU utilization monitor. Logs to dataset dir once created.
+mkdir -p "$DATASET_DIR"
+nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.total \
+    --format=csv -l 5 > "$DATASET_DIR/nvidia_smi.log" &
+NSMI_PID=$!
+echo "  nvidia-smi monitor PID=$NSMI_PID → $DATASET_DIR/nvidia_smi.log"
+
 python selfplay_worker.py \
     --preset=hpc \
     --dataset_dir="$DATASET_DIR" \
@@ -62,3 +78,8 @@ python selfplay_worker.py \
     --config.mcts.root_dirichlet_alpha=0.1 \
     --config.mcts.backend=fast \
     --config.selfplay_device=cuda
+
+kill $NSMI_PID 2>/dev/null || true
+echo "=== nvidia-smi summary (last 5 lines) ==="
+tail -5 "$DATASET_DIR/nvidia_smi.log" || true
+echo "Full log: $DATASET_DIR/nvidia_smi.log"

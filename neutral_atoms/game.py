@@ -39,6 +39,11 @@ class Game:
         self.mcts_boundary_reach_fracs = []
         self.mcts_reached_terminal_fracs = []
         self.mcts_sign_changes_means = []
+        # fast_mcts backend telemetry (0 when backend=classic)
+        self.mcts_nn_h2d_ms_list = []    # H2D transfer time per move (ms)
+        self.mcts_nn_total_ms_list = []  # total NN time per move (h2d + forward, ms)
+        self.mcts_nn_batches_list = []   # NN batch calls per move
+        self.mcts_nn_requests_list = []  # total NN requests per move
 
     def terminal(self):
         return self.done or not self.environment.legal_actions()
@@ -91,6 +96,10 @@ class Game:
         self.mcts_boundary_reach_fracs.append(getattr(root, '_mcts_boundary_reach_frac', 0))
         self.mcts_reached_terminal_fracs.append(getattr(root, '_mcts_reached_terminal_frac', 0))
         self.mcts_sign_changes_means.append(getattr(root, '_mcts_sign_changes_mean', 0))
+        self.mcts_nn_h2d_ms_list.append(getattr(root, '_mcts_nn_h2d_ms', 0.0))
+        self.mcts_nn_total_ms_list.append(getattr(root, '_mcts_nn_total_ms', 0.0))
+        self.mcts_nn_batches_list.append(getattr(root, '_mcts_nn_batches', 0))
+        self.mcts_nn_requests_list.append(getattr(root, '_mcts_nn_requests', 0))
 
     def cache_observation(self):
         obs = self.environment._get_observation()
@@ -160,6 +169,10 @@ class Game:
             'mcts_boundary_reach_fracs': self.mcts_boundary_reach_fracs,
             'mcts_reached_terminal_fracs': self.mcts_reached_terminal_fracs,
             'mcts_sign_changes_means': self.mcts_sign_changes_means,
+            'mcts_nn_h2d_ms_list': self.mcts_nn_h2d_ms_list,
+            'mcts_nn_total_ms_list': self.mcts_nn_total_ms_list,
+            'mcts_nn_batches_list': self.mcts_nn_batches_list,
+            'mcts_nn_requests_list': self.mcts_nn_requests_list,
         }
 
     @classmethod
@@ -194,4 +207,8 @@ class Game:
         game.mcts_boundary_reach_fracs = d.get('mcts_boundary_reach_fracs', [])
         game.mcts_reached_terminal_fracs = d.get('mcts_reached_terminal_fracs', [])
         game.mcts_sign_changes_means = d.get('mcts_sign_changes_means', [])
+        game.mcts_nn_h2d_ms_list = d.get('mcts_nn_h2d_ms_list', [])
+        game.mcts_nn_total_ms_list = d.get('mcts_nn_total_ms_list', [])
+        game.mcts_nn_batches_list = d.get('mcts_nn_batches_list', [])
+        game.mcts_nn_requests_list = d.get('mcts_nn_requests_list', [])
         return game

@@ -12,6 +12,12 @@
 
 - [gumbel_pczero_plan.md](gumbel_pczero_plan.md) — Gumbel AlphaZero + PCZero literature summary and 2×2 ablation plan (control / A=Gumbel / B=PCZero / AB) against `selfplay_v3.md` baseline
 
+## Self-play waves
+
+- [selfplay/selfplay_v3.md](selfplay/selfplay_v3.md) — v3a/v3b random-map waves; plan_cost vs layer_delta A/B; v3a is the reference baseline
+- [selfplay/selfplay_v4.md](selfplay/selfplay_v4.md) — v4 8×8 scaling study
+- [selfplay/selfplay_gumbel.md](selfplay/selfplay_gumbel.md) — **Current.** Gumbel AlphaZero ablation waves; Phase 1 smoke + Phase 2 A/B results; open issues (σ formula, policy entropy)
+
 ## Reward modes
 
 - [reward_modes.md](reward_modes.md) — **All 4 active reward modes**: plan_cost, layer_delta, layer_delta+search_bonus, layer_completion. Formulas, code snippets, properties, and results

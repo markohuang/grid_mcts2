@@ -102,6 +102,13 @@ def _game_metrics(game, game_time):
     avg_mcts_reached_terminal_frac = _mean(game.mcts_reached_terminal_fracs)
     avg_mcts_sign_changes = _mean(game.mcts_sign_changes_means)
     avg_mcts_reward_frac = _mean(game.mcts_reward_fracs)
+    # fast_mcts backend telemetry (0 on backend=classic or device=cpu)
+    total_nn_h2d_ms = sum(game.mcts_nn_h2d_ms_list)
+    total_nn_ms = sum(game.mcts_nn_total_ms_list)
+    total_nn_requests = sum(game.mcts_nn_requests_list)
+    total_nn_batches = sum(game.mcts_nn_batches_list)
+    h2d_frac = round(total_nn_h2d_ms / total_nn_ms, 3) if total_nn_ms > 0 else 0.0
+    eff_batch = round(total_nn_requests / total_nn_batches, 1) if total_nn_batches > 0 else 0.0
     return {
         'steps': total_steps,
         'num_moves': num_moves,
@@ -117,6 +124,10 @@ def _game_metrics(game, game_time):
         'avg_mcts_reached_terminal_frac': round(avg_mcts_reached_terminal_frac, 3),
         'avg_mcts_sign_changes': round(avg_mcts_sign_changes, 3),
         'avg_mcts_reward_frac': round(avg_mcts_reward_frac, 3),
+        'nn_h2d_frac': h2d_frac,          # H2D / total NN time (0 = cpu or classic)
+        'nn_eff_batch': eff_batch,         # effective batch fill: requests / batches
+        'nn_total_h2d_ms': round(total_nn_h2d_ms, 1),
+        'nn_total_ms': round(total_nn_ms, 1),
         'game_time_s': round(game_time, 2),
         'tasks_done': game.last_info.get('tasks_done', 0),
     }

@@ -204,10 +204,12 @@ def run_mcts_batched(mcts_cfg, root, history, network, min_max_stats, env,
     root._mcts_boundary_reach_frac = tot_boundary / num_sims
     root._mcts_reached_terminal_frac = tot_terminal / num_sims
     root._mcts_sign_changes_mean = tot_sign_changes / num_sims
-    # backend-level telemetry (useful for bench, not game-persistent)
+    # backend-level telemetry
     root._mcts_nn_requests = backend.total_requests
     root._mcts_nn_batches = backend.total_batches
     root._mcts_nn_max_batch = backend.max_batch_seen
+    root._mcts_nn_h2d_ms = backend.total_h2d_ms    # 0.0 on CPU
+    root._mcts_nn_total_ms = backend.total_nn_ms   # h2d + forward; 0.0 on CPU (not instrumented)
 
 
 def play_game(game: Game, mcts_cfg, network,

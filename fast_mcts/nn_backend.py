@@ -18,6 +18,7 @@ We intentionally do not build our own caching layer here — Phase 2 adds a
 
 from __future__ import annotations
 from typing import NamedTuple
+import time
 
 import torch
 
@@ -44,6 +45,8 @@ class NNBackend:
         self.total_requests = 0
         self.total_batches = 0
         self.max_batch_seen = 0
+        self.total_h2d_ms = 0.0   # host-to-device transfer time (0 on CPU)
+        self.total_nn_ms = 0.0    # total NN compute time (h2d + forward)
 
     # --- submission ---
 
@@ -108,9 +111,20 @@ class NNBackend:
         features = torch.stack([o.features for o in obses])  # (B, T+1, bs, Q)
         qubits = torch.tensor([o.current_qubit for o in obses], dtype=torch.long)
         device = next(self._net.nnet.parameters()).device
+        is_cuda = device.type == 'cuda'
+        if is_cuda:
+            torch.cuda.synchronize()
+        t_nn_start = time.perf_counter()
         features = features.to(device)
         qubits = qubits.to(device)
+        if is_cuda:
+            torch.cuda.synchronize()
+        t_h2d_done = time.perf_counter()
+        self.total_h2d_ms += (t_h2d_done - t_nn_start) * 1000
         cv_log, lv_log, pi_log = self._net.nnet(features, current_qubit=qubits)
+        if is_cuda:
+            torch.cuda.synchronize()
+        self.total_nn_ms += (time.perf_counter() - t_nn_start) * 1000
         # (B, num_bins), (B, num_bins), (B, board_size)
         cv_mean = self._net.logits2values(cv_log)  # (B,)
         lv_mean = self._net.logits2values(lv_log)

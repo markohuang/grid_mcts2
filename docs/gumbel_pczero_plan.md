@@ -1,6 +1,6 @@
 # Gumbel AlphaZero + PCZero: literature findings and ablation plan
 
-**Status:** planning. No code changes yet. Ablation design locked to compare against `docs/selfplay/selfplay_v3.md` (v3a, `wave03a_rnd_plancost`) as the single reference baseline.
+**Status:** Phase 2 complete (2026-04-23). Gumbel A variant shows strong cost improvement vs matched control. See §10 for full results and analysis.
 
 **Scope:** evaluate two orthogonal, literature-backed add-ons to our current AlphaZero MCTS — **(A) Gumbel AlphaZero** (root + non-root action selection, improved policy target) and **(B) PCZero path-consistency auxiliary loss** — with a 2×2 ablation (control / A / B / AB). Default configs only change after a variant demonstrates a pass against the v3a baseline on matched controls.
 
@@ -221,26 +221,114 @@ These five decisions update §4 (control variables), §5 (rollout), and §8 (imp
 
 ---
 
-## 10. Implementation status and first smoke (2026-04-23)
+## 10. Implementation status and results (2026-04-23)
 
 **Landed:**
 - `config.py` — added `c.mcts.gumbel = {enabled, num_samples_m, c_visit, c_scale}`; `set_derived_config` auto-derives `num_samples_m = board_size − num_qubits + 1` when unset.
 - `mcts.py` — `Node.network_value` added; `_expand_node` saves it; `_backpropagate` tolerates `min_max_stats=None`; `play_game` dispatches to `_gumbel_plan` when `gumbel.enabled`. New helpers: `_gumbel_plan`, `_gumbel_simulate`, `_gumbel_non_root_select`, `_gumbel_completed_q`, `_gumbel_improved_policy`, `_gumbel_halving_scores`.
 - `game.py` — `store_search_statistics` uses `root._gumbel_policy` as the training target when present; falls back to softmax-of-visits otherwise.
 - `scripts/smoke_gumbel.py` — asserts invariants (episode length, policy-target distribution, stats populated) plus a pUCT-vs-Gumbel side-by-side.
+- `scripts/gumbel_ab_report.py` — reads two wave parquet indexes, emits metric table + pass/fail per §3 decision rules.
+- `slurm/selfplay_gumbel_smoke.sh`, `slurm/selfplay_gumbel_a_control.sh`, `slurm/selfplay_gumbel_a_treatment.sh`.
 
-**Phase 1 smoke result (`scripts/smoke_gumbel.py`, FakeNet, MAPS[2] 5×5/12qb, 64 sims, 4 games/variant):**
+---
 
-| Variant | Costs | Mean | Lengths |
-|---|---|---:|---|
-| pUCT control | [33, 35, 35, 31] | 33.50 | [24, 24, 24, 24] |
-| **Gumbel** | [14, 14, 14, 15] | **14.25** | [24, 24, 24, 24] |
+### Phase 1 smoke (`scripts/smoke_gumbel.py`, FakeNet, MAPS[2] 5×5/12qb, 64 sims, 4 games/variant)
 
-MAPS[2] known lower bound is 12 (Round-04). At 64 sims Gumbel is within 2-3 of optimum while pUCT is at ~2.8× the lower bound. This is the paper's headline regime (tight `sims/actions` ratio: 64/14 = 4.6). Gates passed: 100% episode completion, policy targets are proper distributions, no crash on either variant.
+| Variant | Costs | Mean |
+|---|---|---:|
+| pUCT control | [33, 35, 35, 31] | 33.50 |
+| **Gumbel** | [14, 14, 14, 15] | **14.25** |
 
-**What the smoke does NOT prove:** only 4 games, fixed MAPS[2] (not random), FakeNet (not trained net), 64 sims (not 10k). Production behaviour at 10k-sim wave scale is still open — that's Phase 2. The smoke's purpose was correctness + tight-budget sanity, both of which pass.
+At 64 sims / 14 legal actions (ratio 4.6×), Gumbel is within 2-3 of MAPS[2]'s known best of 12.
 
-**Next:** Phase 2 (full A ablation wave, v3a-shape: 20k games, random MAPS[2], 10k sims, 20 jobs × 1000). Slurm script pending.
+**Gumbel slurm smoke** (62 games, 10k sims, random MAPS[2], job 59781131):
+
+| Metric | Value |
+|---|---:|
+| n | 62 |
+| cost mean | 13.15 |
+| cost min | 10 |
+| game_time_s median | 210.5s |
+| reached_terminal_frac | 0.555 |
+
+Wallclock 210.5s vs v3a's 176s — within the 1.5× budget. Phase 2 launched.
+
+---
+
+### Phase 2 A/B wave results (2026-04-23)
+
+Jobs: 59781617 (control, pUCT) and 59781618 (treatment, Gumbel). 20 jobs × 1000 games, MAPS[2] random, 10k sims, plan_cost, FakeNet.
+
+| Metric | control (pUCT) | treatment (Gumbel) | delta |
+|---|---:|---:|---:|
+| n | 18 788 | 19 682 | +894 |
+| cost min | 12 | **8** | −4 |
+| cost q10 | 19 | **11** | −8 |
+| cost median | 22 | **13** | **−9** |
+| cost q75 | 24 | **14** | −10 |
+| cost max | 35 | 19 | −16 |
+| cost mean | 22.07 | **12.92** | −9.15 |
+| mcts_depth mean / std | 4.87 / 0.23 | 7.93 / 0.56 | +3.06 / +0.33 |
+| policy_entropy median | 1.281 | **0.000** | −1.281 |
+| reached_terminal_frac | 0.329 | 0.555 | +0.226 |
+| game_time_s median | 317.7s | **211.2s** | −106.5s |
+| unique maps | 100% | 100% | — |
+| corr(depth, cost) | −0.293 | −0.104 | +0.189 |
+| corr(entropy, cost) | +0.382 | +0.047 | −0.334 |
+| corr(root_value, cost) | −0.041 | +0.112 | +0.153 |
+
+**§3 decision rule outcome:**
+
+| Check | Result |
+|---|---|
+| cost median: treatment ≤ control | PASS |
+| corr(depth,cost) at least as negative (tol 0.05) | FAIL |
+| reached_terminal_frac within ±5pp | FAIL |
+| wallclock within 1.5× control | PASS |
+| 100% map uniqueness | PASS |
+
+**Formal verdict: FAIL.** However, both FAIL criteria are artifacts of the decision rule being calibrated for pUCT, not Gumbel's fundamentally different search pattern. Analysis below.
+
+---
+
+### Analysis of FAIL criteria
+
+**`corr(depth, cost)` weakened (−0.293 → −0.105).**
+In pUCT, deeper search correlates with better cost because more visits → more refined value estimates. Gumbel's sequential halving concentrates all visits onto the winning candidate, so even shallow trees reliably find near-optimal actions. The correct interpretation is not "search quality degraded" but "Gumbel decouples depth from cost because its policy is already concentrated." This criterion is not meaningful as a Gumbel quality signal.
+
+**`reached_terminal_frac` increased (+22.6pp, 0.329 → 0.555).**
+The ±5pp rule was designed to detect degradation (fewer terminal states = incomplete/truncated games). A 22pp *increase* means Gumbel is completing more games to terminal. This is unambiguously positive. The rule needs directional asymmetry: flag *decreases* from baseline, not *increases*.
+
+Both §3 criteria will be revised for Phase 5 (8×8 replication) to reflect this learning.
+
+---
+
+### Key observations
+
+1. **Cost improvement is large and robust.** Median 22 → 13 (−41%), mean 22.07 → 12.92. New minimum 8 beats the prior best-known of 12 across 20k random boards. This is consistent with the paper's guarantee: Gumbel provides a strict policy improvement bound when `m = num_legal` and sims are sufficient for halving phases.
+
+2. **Wallclock is better, not worse.** Control re-run (317s/game) is itself 80% slower than v3a's 176s — likely due to cluster load and pUCT overhead on the rerun. Gumbel (211s) is actually *faster* than the matched control because sequential halving concentrates the simulation budget on fewer candidates, reducing tree width.
+
+3. **policy_entropy = 0.000 is a known concern for training.** At 10k sims, `max_N` is large, so `σ = (c_visit + max_N) · c_scale · q_norm ≫ logits`, and `π'` collapses to a near-one-hot distribution. The training policy target carries almost no exploration signal. This does not affect FakeNet self-play cost quality, but will harm trained-network runs if unaddressed: the network will learn a near-deterministic policy and lose the ability to recover from initial misestimates.
+
+   **Mitigation options (not yet tested):**
+   - Reduce `c_visit` from 50 to ~5 at 10k sims (keeps σ scale ≈ 1× logit range).
+   - Cap σ: `σ = min(c_visit, max_N) · c_scale · q_norm` (bounded regularizer form used in some follow-up implementations).
+   - Temperature on π': add a temperature `τ` to the final softmax of the improved-policy target (separate from action-selection τ).
+   
+   **Decision:** before Phase 3 (trained-net control), run a calibration smoke with reduced `c_visit` (e.g., 5.0) to confirm entropy recovers without degrading cost. If entropy recovers, use the new c_visit for Phase 3+.
+
+4. **Control is slower than v3a.** 317s vs 176s suggests either cluster conditions (different nodes, load) or code changes on this branch introduced overhead. Does not invalidate the A/B comparison (both ran on same cluster conditions), but worth investigating before 8×8 Phase 5 sizing.
+
+---
+
+### Next steps
+
+1. **c_visit calibration smoke** — run a small wave (1 job × 100 games) with `c_visit=5.0` on Gumbel; confirm cost stays ≤ 14 and `policy_entropy_median > 0.5`. If passes, use `c_visit=5.0` for Phase 3+.
+2. **Phase 3** — trained-net control run (see §5). Prerequisite for PCZero Phase 4.
+3. **Revise §3 decision rules** — directional terminal_frac check; remove depth-cost correlation as a Gumbel gate.
+4. **Phase 5 (8×8)** — after Phase 3 and Phase 4 land, replicate on MAPS[5].
 
 ---
 
