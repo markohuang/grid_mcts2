@@ -1,0 +1,75 @@
+{
+  "note": "Phase 0 baseline — classic MCTS, single-process, torch.set_num_threads(1), CPU. Timings recorded via fast_mcts/bench.py monkey-patch instrumentation. Compare future fast backend against these.",
+  "hardware": {
+    "threads": 1,
+    "device": "cpu"
+  },
+  "runs": [
+    {
+      "label": "map2_fake_25sims",
+      "backend": "classic",
+      "map_num": 2, "sims": 25, "games": 2, "fake": true,
+      "wall_s": 0.44, "games_per_s": 4.55, "avg_game_s": 0.21, "total_steps": 48, "best_cost": 33,
+      "top_buckets_pct": {
+        "env.step": 38.7,
+        "mcts._select_child": 12.8,
+        "network.inference": 11.9,
+        "env.legal_actions": 10.9,
+        "env.get_features": 6.2
+      }
+    },
+    {
+      "label": "map2_real_25sims",
+      "backend": "classic",
+      "map_num": 2, "sims": 25, "games": 2, "fake": false,
+      "wall_s": 1.90, "games_per_s": 1.05, "avg_game_s": 0.95, "total_steps": 48, "best_cost": 33,
+      "top_buckets_pct": {
+        "network.inference": 73.2,
+        "env.step": 12.1,
+        "mcts._select_child": 3.7,
+        "env.legal_actions": 3.1
+      }
+    },
+    {
+      "label": "map2_fake_100sims",
+      "backend": "classic",
+      "map_num": 2, "sims": 100, "games": 3, "fake": true,
+      "wall_s": 2.81, "games_per_s": 1.07, "avg_game_s": 0.93, "total_steps": 72, "best_cost": 28,
+      "top_buckets_pct": {
+        "env.step": 45.7,
+        "mcts._select_child": 17.1,
+        "network.inference": 10.0,
+        "env.legal_actions": 8.5,
+        "env.get_features": 5.2
+      }
+    },
+    {
+      "label": "map2_real_100sims",
+      "backend": "classic",
+      "map_num": 2, "sims": 100, "games": 5, "fake": false,
+      "wall_s": 18.63, "games_per_s": 0.27, "avg_game_s": 3.72, "total_steps": 120, "best_cost": 30,
+      "top_buckets_pct": {
+        "network.inference": 70.5,
+        "env.step": 14.8,
+        "mcts._select_child": 5.0,
+        "env.legal_actions": 2.9,
+        "env.get_features": 1.8
+      }
+    }
+  ],
+  "takeaways": {
+    "real_net_bottleneck": "network.inference dominates at 70%+ wall at sims=100 (10k+ calls, batch=1, ~1.23 ms/call). Leaf batching (Phase 1) is the largest available lever.",
+    "fake_net_bottleneck": "env.step (40%+) + python MCTS overhead (select/legal/features/clone ~35%). Relevant for when GPU NN becomes cheap — then Phase 3 vec_env and Phase 4 flat-tree matter.",
+    "phase1_theoretical_max": "Batching N leaves into one fwd pass collapses 70.5% -> ~70.5%/N at ideal GPU scaling. With N=32 and real GPU, expect ~10-15x end-to-end self-play throughput."
+  },
+  "phase1_results": {
+    "note": "fast backend: leaf-gather + virtual loss (lc0-style), AlphaDev semantics preserved at vl=0/batch=1. Measured on CPU (same hardware as baseline).",
+    "config": "map=2, sims=100, 3 games, real net, CPU, torch.set_num_threads(1)",
+    "classic_baseline": {"wall_s": 11.40, "games_per_s": 0.26, "avg_game_s": 3.79, "nn_calls": 6411, "nn_pct": 70.7},
+    "fast_parity_mode": {"wall_s": 11.39, "games_per_s": 0.26, "avg_game_s": 3.79, "nn_calls": 6284, "nn_pct": 69.8, "note": "byte-identical to classic, same wall — correctness + regression guard"},
+    "fast_batch16_vl1": {"wall_s": 2.36, "games_per_s": 1.27, "avg_game_s": 0.78, "nn_calls": 347, "nn_pct": 19.7, "speedup_vs_classic": 4.83},
+    "fast_batch32_vl1_5": {"wall_s": 2.13, "games_per_s": 1.41, "avg_game_s": 0.71, "nn_calls": 148, "nn_pct": 9.0, "speedup_vs_classic": 5.35},
+    "remaining_bottleneck": "env.step (31%) + env.legal_actions (13%) dominate at batch=32. These are the Phase 3 (vec_env) targets.",
+    "expected_gpu_gain": "On GPU the per-call ~1.3 ms drops by 5-10x due to kernel-launch amortization → fast_batch32 should be ~15-25x vs classic on GPU."
+  }
+}
