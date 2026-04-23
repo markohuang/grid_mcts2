@@ -133,7 +133,10 @@ def build_config(map_num: int, sims: int, use_fake: bool,
 
 def run_bench(*, backend_name: str, games: int, sims: int, map_num: int,
               use_fake: bool, seed: int, deterministic: bool,
-              nn_batch_size: int = 1, virtual_loss: float = 0.0) -> dict:
+              nn_batch_size: int = 1, virtual_loss: float = 0.0,
+              cache_cap: int = 0) -> dict:
+    """`cache_cap > 0` enables a shared NNCache across all games (persists
+    across games = lc0-like per-map transposition reuse). 0 = no cache."""
     torch.manual_seed(seed)
     torch.set_num_threads(1)
 
@@ -154,17 +157,23 @@ def run_bench(*, backend_name: str, games: int, sims: int, map_num: int,
     best_cost = None
     total_steps = 0
 
+    cache = None
+    if cache_cap > 0 and backend_name == 'fast':
+        from .nn_cache import NNCache
+        cache = NNCache(cap=cache_cap)
+
     t0 = time.perf_counter()
     with instrument_classic(timings):
         for i in range(games):
             g = Game(cfg, tasks, initial_positions)
             tg0 = time.perf_counter()
-            g = play_game(g, cfg.mcts, net,
-                          add_exploration_noise=not deterministic,
-                          deterministic=deterministic)
+            kw = dict(add_exploration_noise=not deterministic,
+                      deterministic=deterministic)
+            if cache is not None:
+                kw['cache'] = cache
+            g = play_game(g, cfg.mcts, net, **kw)
             game_times.append(time.perf_counter() - tg0)
             total_steps += len(g.history)
-            # basic sanity
             from neutral_atoms.experiment import compute_solution_cost
             c = compute_solution_cost(g)
             best_cost = c if best_cost is None else min(best_cost, c)
@@ -178,6 +187,8 @@ def run_bench(*, backend_name: str, games: int, sims: int, map_num: int,
         'use_fake': use_fake,
         'nn_batch_size': nn_batch_size,
         'virtual_loss': virtual_loss,
+        'cache_cap': cache_cap,
+        'cache_stats': cache.stats() if cache is not None else None,
         'wall_s': wall,
         'games_per_s': games / wall if wall > 0 else 0.0,
         'avg_game_s': sum(game_times) / len(game_times),
@@ -193,6 +204,10 @@ def print_report(r: dict) -> None:
            f"fake={r['use_fake']}")
     if r['backend'] == 'fast':
         tag += f" nn_batch={r.get('nn_batch_size', 1)} vl={r.get('virtual_loss', 0.0)}"
+    if r.get('cache_cap', 0) > 0:
+        cs = r.get('cache_stats') or {}
+        tag += (f" cache(cap={r['cache_cap']} hits={cs.get('hits',0)} "
+                f"miss={cs.get('misses',0)} rate={cs.get('hit_rate',0.0):.1%})")
     print(tag)
     print(f"  wall={r['wall_s']:.2f}s  throughput={r['games_per_s']:.2f} g/s  "
           f"avg_game={r['avg_game_s']:.2f}s  total_steps={r['total_steps']}  "
@@ -215,6 +230,8 @@ def main():
                    dest='nn_batch_size')
     p.add_argument('--virtual-loss', type=float, default=0.0,
                    dest='virtual_loss')
+    p.add_argument('--cache-cap', type=int, default=0, dest='cache_cap',
+                   help='Shared NNCache capacity across games. 0 = disabled.')
     args = p.parse_args()
 
     r = run_bench(
@@ -223,6 +240,7 @@ def main():
         deterministic=args.deterministic,
         nn_batch_size=args.nn_batch_size,
         virtual_loss=args.virtual_loss,
+        cache_cap=args.cache_cap,
     )
     print_report(r)
 

@@ -1,8 +1,9 @@
-"""Batched NN backend (lc0 `BackendComputation` analog).
+"""Batched NN backend (lc0 `BackendComputation` analog) + optional cache hook.
 
 Contract:
-  - `add(obs)` queues a leaf request, returns `slot_id`.
-  - `compute_blocking()` evaluates all pending requests in one go.
+  - `add(features, current_qubit)` queues a leaf request, returns `slot_id`.
+  - `compute_blocking()` evaluates all pending un-cached requests in one go;
+    cache hits were already written into `_slots_out` during `add`.
   - `get(slot_id)` retrieves the `NetworkOutput` for a queued leaf.
 
 Parity rules:
@@ -12,17 +13,22 @@ Parity rules:
     back per slot. Not bit-exact vs per-sample in all corners (torch batched
     reductions can differ by ~1e-7), so parity tests MUST keep cap=1.
 
-We intentionally do not build our own caching layer here — Phase 2 adds a
-`memcache`-style short-circuit on top of this interface (`FETCHED_IMMEDIATELY`).
+Cache (Phase 2): optional `cache` kwarg. None = Phase 1 behaviour unchanged.
+When provided, `add` does an O(1) lookup; hit → slot pre-filled and
+`compute_blocking` skips it (lc0 `FETCHED_IMMEDIATELY` analog). Newly-computed
+misses are inserted after compute. Byte-identical to no-cache at safe knobs
+(determinism in eval mode).
 """
 
 from __future__ import annotations
-from typing import NamedTuple
 import time
+from typing import NamedTuple, Optional
 
 import torch
 
 from neutral_atoms.network import Network, NetworkOutput
+
+from .nn_cache import NNCache, make_feature_key
 
 
 class LeafObs(NamedTuple):
@@ -32,21 +38,29 @@ class LeafObs(NamedTuple):
 
 class NNBackend:
     """Pluggable NN evaluator. One instance per `run_mcts` call is fine;
-    slot_ids are reset every `compute_blocking()`."""
+    slot_ids are reset every `compute_blocking()`. Cache (if provided)
+    persists across resets — ownership is the caller's."""
 
-    def __init__(self, network: Network, *, cap: int = 1):
+    def __init__(self, network: Network, *, cap: int = 1,
+                 cache: Optional[NNCache] = None):
         assert cap >= 1
         self._net = network
         self._cap = cap
         self._use_fake = getattr(network, 'use_fake', False)
+        self._cache = cache
         self._slots_obs: list[LeafObs] = []
         self._slots_out: list[NetworkOutput | None] = []
+        # Per-slot cache key (None if cache disabled OR slot was a cache hit —
+        # in the hit case we don't need to re-insert after compute).
+        self._slot_keys: list[Optional[tuple]] = []
         # Stats
         self.total_requests = 0
         self.total_batches = 0
         self.max_batch_seen = 0
         self.total_h2d_ms = 0.0   # host-to-device transfer time (0 on CPU)
         self.total_nn_ms = 0.0    # total NN compute time (h2d + forward)
+        self.cache_hits = 0       # slots short-circuited via cache
+        self.nn_calls = 0         # slots that actually required the net forward
 
     # --- submission ---
 
@@ -58,12 +72,28 @@ class NNBackend:
         return len(self._slots_obs)
 
     def has_pending(self) -> bool:
-        return bool(self._slots_obs)
+        # Only slots that still need compute count as "pending" for gather logic.
+        return any(out is None for out in self._slots_out)
 
     def add(self, features: torch.Tensor, current_qubit: int) -> int:
         slot_id = len(self._slots_obs)
         self._slots_obs.append(LeafObs(features, int(current_qubit)))
+        if self._cache is not None:
+            key = make_feature_key(features, current_qubit)
+            hit = self._cache.get(key)
+            if hit is not None:
+                # Cache hit: pre-fill slot, don't queue for compute.
+                self._slots_out.append(hit)
+                self._slot_keys.append(None)
+                self.cache_hits += 1
+                return slot_id
+            # Miss: queue for compute, remember key for post-insert.
+            self._slots_out.append(None)
+            self._slot_keys.append(key)
+            return slot_id
+        # No cache
         self._slots_out.append(None)
+        self._slot_keys.append(None)
         return slot_id
 
     def get(self, slot_id: int) -> NetworkOutput:
@@ -74,26 +104,32 @@ class NNBackend:
     # --- compute ---
 
     def compute_blocking(self) -> None:
-        n = len(self._slots_obs)
+        # Indices of slots that still need the NN.
+        pending_idx = [i for i, out in enumerate(self._slots_out) if out is None]
+        n = len(pending_idx)
         if n == 0:
             return
         self.total_requests += n
+        self.nn_calls += n
         self.total_batches += 1
         self.max_batch_seen = max(self.max_batch_seen, n)
-        # Parity path: cap==1 OR fake net → per-slot Network.inference (exact).
-        # Bulk path: real batch forward, split outputs.
+        pending_obs = [self._slots_obs[i] for i in pending_idx]
         if n == 1 or self._cap == 1 or self._use_fake:
-            for i, obs in enumerate(self._slots_obs):
-                out = self._infer_single(obs)
-                self._slots_out[i] = out
+            outs = [self._infer_single(o) for o in pending_obs]
         else:
-            outs = self._infer_batch(self._slots_obs)
-            for i, out in enumerate(outs):
-                self._slots_out[i] = out
+            outs = self._infer_batch(pending_obs)
+        for i, out in zip(pending_idx, outs):
+            self._slots_out[i] = out
+            # Insert newly-computed result into cache.
+            if self._cache is not None:
+                k = self._slot_keys[i]
+                if k is not None:
+                    self._cache.put(k, out)
 
     def reset(self) -> None:
         self._slots_obs.clear()
         self._slots_out.clear()
+        self._slot_keys.clear()
 
     # --- internals ---
 

@@ -63,3 +63,4 @@ data_selfplay/
 /pipelines/
 *.pt
 smoke_bootstrap/
+any_order_mcts/

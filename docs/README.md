@@ -24,6 +24,10 @@
 - [reward_analysis.md](reward_analysis.md) — Detailed derivations: why Option A telescopes, Q-collapse proof, correction term math
 - [reward_hybrid_designs.md](reward_hybrid_designs.md) — Hybrid reward proposals (layer_delta + plan_cost shaping as potential function)
 
+## Baselines
+
+- [baselines/simulated_annealing.md](baselines/simulated_annealing.md) — SA baseline (Kirkpatrick '83, Fast-SA, Enola) adapted to per-layer atom placement with exact env cost
+
 ## Reference
 
 - [alphadev_comparison.md](alphadev_comparison.md) — AlphaDev architecture comparison

@@ -100,8 +100,14 @@ def test_cross_classic_vs_fast_defaults(map_num, sims, fake):
 # ---- cross-backend (scaffold — activated once 'fast' lands) ----
 
 def run_cross_backend_parity(a: str, b: str, **cfg_kw) -> None:
+    """Byte-identical parity between backends requires the safe knob set:
+    nn_batch_size=1, virtual_loss=0. Force it here — repo defaults now carry
+    production values (batch=32, vl=1.0) that break byte-parity by design."""
     seed = cfg_kw.pop('seed', 42)
     cfg = build_cfg(**cfg_kw)
+    with cfg.mcts.unlocked():
+        cfg.mcts.nn_batch_size = 1
+        cfg.mcts.virtual_loss = 0.0
     tasks, ip = build_env_spec(cfg)
     net = make_network(cfg, seed)
     ga = play_once(a, cfg, net, tasks, ip, seed=seed,

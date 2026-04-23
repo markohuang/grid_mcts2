@@ -30,6 +30,24 @@ from neutral_atoms.mcts import (
 )
 
 from .nn_backend import NNBackend
+from .nn_cache import make_feature_key
+
+
+def _root_inference(obs, network, cache):
+    """Root-state inference with optional cache lookup. Byte-identical to
+    network.inference(obs, aslist=True) on miss (cache returns same bytes
+    on hit under NN determinism)."""
+    if cache is not None:
+        key = make_feature_key(obs['features'], obs['current_qubit'])
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        with torch.no_grad():
+            out = network.inference(obs, aslist=True)
+        cache.put(key, out)
+        return out
+    with torch.no_grad():
+        return network.inference(obs, aslist=True)
 
 
 def _cfg(mcts_cfg, name, default):
@@ -106,10 +124,11 @@ class _LeafReq:
 
 
 def run_mcts_batched(mcts_cfg, root, history, network, min_max_stats, env,
-                     *, nn_batch_size: int, virtual_loss: float):
+                     *, nn_batch_size: int, virtual_loss: float,
+                     cache=None):
     num_sims = mcts_cfg.num_simulations
     assert num_sims > 0
-    backend = NNBackend(network, cap=nn_batch_size)
+    backend = NNBackend(network, cap=nn_batch_size, cache=cache)
 
     # per-sim telemetry (mirror classic)
     tot_depth = 0
@@ -210,12 +229,21 @@ def run_mcts_batched(mcts_cfg, root, history, network, min_max_stats, env,
     root._mcts_nn_max_batch = backend.max_batch_seen
     root._mcts_nn_h2d_ms = backend.total_h2d_ms    # 0.0 on CPU
     root._mcts_nn_total_ms = backend.total_nn_ms   # h2d + forward; 0.0 on CPU (not instrumented)
+    root._mcts_nn_cache_hits = backend.cache_hits
+    root._mcts_nn_nn_calls = backend.nn_calls
 
 
 def play_game(game: Game, mcts_cfg, network,
               *, add_exploration_noise: bool = True,
               deterministic: bool = False,
-              temperature_override: float | None = None) -> Game:
+              temperature_override: float | None = None,
+              cache=None) -> Game:
+    """Fast backend play_game.
+
+    `cache`: optional `NNCache` instance. None (default) = Phase 1 behaviour.
+    When provided, NN transposition cache is consulted on every leaf eval;
+    ownership/lifetime is the caller's (per-game / per-map / cross-map).
+    """
     nn_batch_size = int(_cfg(mcts_cfg, 'nn_batch_size', 1))
     virtual_loss = float(_cfg(mcts_cfg, 'virtual_loss', 0.0))
     assert nn_batch_size >= 1
@@ -231,8 +259,7 @@ def play_game(game: Game, mcts_cfg, network,
         min_max_stats = MinMaxStats(mcts_cfg.known_bounds)
         root = Node(0)
         obs = game.make_observation(-1)
-        with torch.no_grad():
-            out = network.inference(obs, aslist=True)
+        out = _root_inference(obs, network, cache)
         _expand_node(root, game.legal_actions(), out, reward=0,
                      sim_env=game.environment, config=mcts_cfg)
         _backpropagate([root], out.value, mcts_cfg.discount, min_max_stats)
@@ -242,7 +269,8 @@ def play_game(game: Game, mcts_cfg, network,
         run_mcts_batched(mcts_cfg, root, game.history, network,
                          min_max_stats, game.environment,
                          nn_batch_size=nn_batch_size,
-                         virtual_loss=virtual_loss)
+                         virtual_loss=virtual_loss,
+                         cache=cache)
         action = _select_action(
             len(game.history), root, mcts_cfg, game.action_space_size,
             deterministic=deterministic,

@@ -161,11 +161,179 @@ Zero lines modified outside `fast_mcts/`.
 
 ---
 
-## Phase 2 — transposition cache (planned)
+## Phase 2 — transposition cache (scouting complete, ready to build)
 
-Keyed by `(board.tobytes(), tasks_done, current_atom_idx)`. Cache hit →
-skip GPU entirely (`FETCHED_IMMEDIATELY` analog). LRU cap ~200k entries.
-Expected win: 20-40% on repeated states in long games.
+### Scouting: cache_estimator.py
+
+Before building the cache, we measured **cache-hit-rate upper bound** by
+instrumenting `NNBackend.add`: record `(features.tobytes(), current_qubit)`
+per request, count unique keys vs total. Since the NN is deterministic in
+eval mode, any duplicate key is a guaranteed cache hit — tells us exactly
+what a cache would save.
+
+Run: `python -m fast_mcts.cache_estimator --sweep` (~60s).
+
+### Results (fake net unless noted)
+
+| scenario | total req | unique | hit% | within-game | cross-game | projected × |
+|----------|-----------|--------|------|-------------|------------|-------------|
+| m0 25sim 1game | 496 | 342 | 31.0% | 31.0% | 0.0% | 1.28× |
+| m0 25sim 3games | 1488 | 342 | 77.0% | 31.0% | 46.0% | 2.17× |
+| m0 25sim 10games | 4960 | 342 | 93.1% | 31.0% | 62.1% | 2.87× |
+| m0 100sim 1game | 1874 | 1163 | 37.9% | 37.9% | 0.0% | 1.36× |
+| m0 100sim 10games | 18740 | 1163 | 93.8% | 37.9% | 55.9% | 2.91× |
+| m2 25sim 1game | 543 | 479 | 11.8% | 11.8% | 0.0% | 1.09× |
+| m2 25sim 10games | 5430 | 479 | 91.2% | 11.8% | 79.4% | 2.76× |
+| m2 100sim 1game | 2060 | 1712 | 16.9% | 16.9% | 0.0% | 1.13× |
+| m2 100sim 3games | 6180 | 1712 | 72.3% | 16.9% | 55.4% | 2.02× |
+| m2 100sim 10games | 20600 | 1712 | 91.7% | 16.9% | 74.8% | 2.79× |
+| m2 200sim 10games | 40560 | 3292 | 91.9% | 18.8% | 73.0% | 2.80× |
+| m2 100sim **batch=32 vl=1.5** | 1720 | 342 | **80.1%** | 0.6% | 79.5% | 2.28× |
+| real-net m0 25sim 3games | 1485 | 332 | 77.6% | 32.9% | 44.7% | 2.19× |
+
+Projected speedup assumes NN = 70% of wall (real-net CPU baseline). Cache
+overhead ~1 µs per hit vs ~1.3 ms per NN call → negligible.
+
+### Findings
+
+1. **Within-game hits scale with sims × map complexity.** Small map (m0) has
+   31-38% within-game; medium map (m2) has 12-19%. More sims per move →
+   slightly more tree overlap, but not dominant.
+
+2. **Cross-game hits dominate at ≥3 games** (46-80%). Fixed-map games
+   re-explore the same early-layer states every game. By game 10 the
+   state space is saturated (342 unique on m0, 1712-3292 on m2).
+
+3. **Virtual loss destroys within-game hits.** batch=32/vl=1.5 drops
+   within-game from 16.9% → 0.6% — VL's whole job is to force different
+   paths, and it works. **Cross-game hits unaffected** (79.5%), and that's
+   what matters in a training run with many self-play games.
+
+4. **Random-board mode (`v4`) is the worst case.** Fresh map each game →
+   no cross-game reuse → only within-game (≤20%) → 1.1-1.2× speedup.
+   Probably not worth building the cache just for this.
+
+5. **Fixed-map self-play (eval, specialist training, iterative refinement)
+   is the best case.** 2-3× speedup on top of Phase 1.
+
+6. **Memory cheap.** Worst case we saw (m2 200sim, 10 games) = 3292
+   unique × ~900 bytes/entry = 3 MB. 8×8 maps could reach 100k entries
+   (~90 MB) — still trivial. LRU cap at 50k-200k safe.
+
+### Phase 2 design
+
+**Two-layer cache**, both wrapping `NNBackend`:
+
+- **L1 (per-run_mcts)**: dict reset each `compute_blocking`, handles the
+  collision dedup we already do. Marginal — the within-game rate is 1-38%
+  depending on map; mostly covered by L2 anyway.
+- **L2 (persistent)**: LRU (`collections.OrderedDict`) keyed by
+  `(map_id, features.tobytes(), current_qubit)`. Lives across games of
+  the same map. Invalidated when `cfg.random_board = True` (each game =
+  new map).
+
+**Alternative — per-map cache handle**: trainer / self-play driver creates
+one `NNCache(map_id, cap=50_000)`, passes into `play_game`. Fast backend
+reads it. Lifetime explicit, no global state. Preferred.
+
+**Integration point**: subclass `NNBackend` or compose:
+
+```python
+class CachedNNBackend(NNBackend):
+    def __init__(self, network, cache, *, cap):
+        super().__init__(network, cap=cap)
+        self._cache = cache   # or None to disable
+    def add(self, features, current_qubit):
+        if self._cache is not None:
+            key = (features.tobytes(), int(current_qubit))
+            hit = self._cache.get(key)
+            if hit is not None:
+                slot = super().add(features, current_qubit)
+                self._slots_out[slot] = hit   # FETCHED_IMMEDIATELY
+                return slot
+        return super().add(features, current_qubit)
+    def compute_blocking(self):
+        # collect keys for newly-computed slots, insert into cache after.
+        ...
+```
+
+**Key choice**: `features.tobytes()` keeps it simple and exact. A smarter
+version keys on `(board, tasks_done)` alone and caches the full per-qubit
+policy tensor, slicing `current_qubit` on lookup — would raise hit rate
+further (value head output is qubit-independent). Defer to Phase 2b.
+
+### Parity contract for Phase 2
+
+- Cache on / off must produce byte-identical output at `batch=1, vl=0`.
+  NN is deterministic → cache hit = re-evaluation, same bytes.
+- Parametrize `test_cross_classic_vs_fast_defaults` over `use_cache ∈
+  {True, False}` — new scenarios, same assertion.
+- Cache can never see `prior_mix_weight > 0` (phase 1 already rejects).
+- Gumbel path (`_gumbel_simulate` calls `network.inference` directly)
+  bypasses our cache in Phase 2. Cache only helps pUCT path. Note in docs.
+
+### Go/no-go
+
+**Go.** Expected 2-3× on fixed-map training workloads (which is most of
+our real training). 1.1-1.3× on random-board. Low implementation risk
+(well-understood LRU + dict). Low memory.
+
+### Implementation (delivered)
+
+- `fast_mcts/nn_cache.py` — `NNCache` LRU (OrderedDict, `cap`, hits/misses/
+  insertions/evictions, `make_feature_key`).
+- `fast_mcts/nn_backend.py` — `cache=None` kwarg on `NNBackend`. On `add`:
+  lookup, pre-fill slot on hit (`cache_hits` counter), queue + register
+  key on miss. On `compute_blocking`: skip pre-filled slots, insert new
+  results into cache.
+- `fast_mcts/search.py` — `cache` kwarg plumbed through `play_game` and
+  `run_mcts_batched`. Root inference uses same cache via `_root_inference`
+  helper. Default `None` = Phase 1 behaviour unchanged.
+- `fast_mcts/test_cache.py` — 18 tests, 3 layers:
+  - LRU semantics (7 tests): get/put/miss, eviction, MRU promotion, clear,
+    overwrite, feature-key stability.
+  - Backend integration (2): hit byte-equal to miss, no-cache matches Phase 1.
+  - Full-game (9): byte-parity cache-on vs cache-off (4 combos), cache-on
+    vs classic (2 combos), invariants with cache at batch=8 vl=1, cross-game
+    persistence, cap enforcement.
+
+### Bench (map=2, sims=100, batch=32, vl=1.5, real net, CPU, 10 games)
+
+| mode | cache | hit rate | wall | g/s | speedup |
+|------|-------|----------|------|-----|---------|
+| deterministic | off | — | 7.29s | 1.37 | 1.00× |
+| deterministic | cap=50k | **90.6%** | 4.86s | 2.06 | **1.50×** |
+| noise (production) | off | — | 7.10s | 1.41 | 1.00× |
+| noise (production) | cap=50k | 11.6% | 6.57s | 1.52 | 1.08× |
+
+### Key finding: cache value depends on Dirichlet noise
+
+Deterministic self-play (eval mode, no noise) reaches 90.6% hit rate
+(matches estimator's 91.7%) → **1.5× speedup on top of Phase 1's 5.35×,
+cumulative 8× vs classic**.
+
+Production self-play (Dirichlet on at root) gets only 11.6% hit rate.
+Root noise is different every game → root priors differ → trees explore
+different branches → leaf states rarely repeat across games. Cross-game
+reuse (the dominant 79% from estimator) assumed shared descent — noise
+breaks that assumption.
+
+**Implications:**
+- **Eval / ablation / specialist training with noise_off** → full 1.5×
+  cache win. Bake into `eval_checkpoint.py` / `pipeline_eval.py`.
+- **Production self-play with noise** → 5-12% wall win. Still net positive
+  (cache overhead ~1 µs / hit, NN saves ~1.3 ms), but not transformative.
+- **Within-game hits preserved** even with noise, because a single tree's
+  UCB descent produces some collisions. That's the 5-12% we do see.
+
+### Parity status: ALL GREEN
+
+- 62/62 fast_mcts tests pass (44 Phase 1 + 18 Phase 2)
+- Cross-backend byte-parity (classic ≡ fast cache=on) at safe knobs: 2/2 combos
+- Cache-on vs cache-off byte-parity: 4/4 combos
+- Invariants + full-game completion under cache: all pass
+- Runtime: 21.77s for quick suite (was 16.35s pre-cache) +5s for 18 new tests
+- Runtime w/ stat-parity: ~1m47s (unchanged)
 
 ---
 

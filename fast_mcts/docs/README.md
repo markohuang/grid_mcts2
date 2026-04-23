@@ -10,6 +10,7 @@ control flow only.
 1. [`philosophy.md`](philosophy.md) — AlphaDev + lc0 alignment rules we enforce
 2. [`tests.md`](tests.md) — 4-layer correctness coverage + how to run
 3. [`phases.md`](phases.md) — per-phase design, bench numbers, bugs, next steps
+4. [`gumbel_integration.md`](gumbel_integration.md) — design for `fast_gumbel` backend (implement after classic Gumbel A/B validates)
 
 ## Status
 
@@ -17,7 +18,7 @@ control flow only.
 |-------|-------|--------|------------------------------------------|
 | 0 | Bench harness + classic baseline + test scaffolding | done | 1.00× (baseline) |
 | 1 | Leaf-gather + virtual loss (lc0 BackendComputation analog) | done | **5.35×** |
-| 2 | NN transposition cache (FETCHED_IMMEDIATELY short-circuit) | planned | — |
+| 2 | NN transposition cache (FETCHED_IMMEDIATELY short-circuit) | **done** | **1.50× deterministic / 1.08× noise-on** (on top of Phase 1) |
 | 3 | Vec env — drop per-sim `env.clone()` | planned | — |
 | 4 | Flat-array tree (parent/child idx tensors) | planned | — |
 
