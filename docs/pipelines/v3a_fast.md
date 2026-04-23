@@ -73,11 +73,19 @@ Comparison baseline is v3a01 cycle_05 at **537s/game** (classic/CPU, same ckpt).
 
 | Metric | v3a01 c5 (classic/CPU) | Smoke A (fast/CPU) | notes |
 |---|---|---|---|
-| avg_game_time_s | 537 | **TBD** | |
-| avg_cost | 12.99 | TBD | should match within noise |
-| nn_eff_batch | — | TBD | target ≥ 28 (batch=32) |
-| nn_h2d_frac | — | 0.0 (expected) | CPU: no H2D |
-| speedup | 1.0× | **TBD** | Phase 1 bench CPU: 5.35× at 100 sims |
+| avg_game_time_s | 537 | **262** | **2.05× speedup** |
+| avg_cost | 12.99 | 12.82 | quality maintained (min 9 vs 8) |
+| nn_eff_batch | — | **5.5** | cap=32; low — see finding below |
+| terminal_frac | — | 84.7% | most sims hit terminal, skip NN |
+| nn_total_ms (% of game) | — | 10.6% | NN is NOT the bottleneck at 10k sims |
+| nn_h2d_frac | — | 0.0 | CPU: no H2D |
+| speedup | 1.0× | **2.05×** | Phase 1 bench was 5.35× at 100 sims |
+
+**Finding (critical):** with the trained v3a01 prior, 84.7% of 10k simulations reach a
+terminal node and never call the NN. The gather batch fills to only 5.5/32 leaves on
+average. NN time is 10.6% of game time; env.step/clone is 89.4%. Phase 1 (NN batching)
+gives 2× because it reduces NN overhead and Python dispatch, but env is the real bottleneck.
+Phase 3 (vec env / undo-stack) is the next lever.
 
 ### Smoke B — GPU fast, 1 worker (per-game timing)
 
@@ -87,42 +95,89 @@ Comparison baseline is v3a01 cycle_05 at **537s/game** (classic/CPU, same ckpt).
 **SLURM job:** 59789771 (pending Priority)  
 **Dataset:** `/scratch/huang651/grid_mcts2/datasets/v3a_fast_gpu_smoke`
 
+Sanity script failed with `ModuleNotFoundError: fast_mcts` (fixed: added `sys.path` insert).
+Selfplay proceeded (non-blocking). Re-run sanity checks standalone after smoke completes.
+
 | Metric | Smoke B (fast/GPU, 1w) | notes |
 |---|---|---|
-| Sanity check 1 (parity) | TBD | |
-| Sanity check 2 (H2D frac) | TBD | target < 0.20 |
-| Sanity check 3 (quality) | TBD | |
-| avg_game_time_s | **TBD** | |
-| avg_cost | TBD | |
-| nn_eff_batch | TBD | |
-| nn_h2d_frac | TBD | |
-| GPU util % (nvidia-smi) | TBD | target > 40% |
-| speedup vs v3a01 c5 (537s) | TBD | |
-| speedup vs Smoke A | TBD | |
+| Sanity check 1 (parity) | **errored** | import fix applied; re-run pending |
+| Sanity check 2 (H2D frac) | **errored** | |
+| Sanity check 3 (quality) | **errored** | |
+| avg_game_time_s | **~363** (5/10 games) | **SLOWER than CPU fast (262s)** |
+| avg_cost | ~11.4 | quality fine |
+| nn_eff_batch | ~5.5 | same as CPU: terminal_frac limits batch fill |
+| GPU util % (nvidia-smi) | **1%** | A100 idle >99% of the time |
+| speedup vs v3a01 c5 (537s) | ~1.48× | worse than CPU fast |
+| speedup vs Smoke A (CPU fast) | **~0.72×** | GPU adds overhead, not gain |
 
-### Smoke B2 — GPU fast, 4 workers (throughput)
+**Finding (critical):** GPU selfplay is *counterproductive* at 10k sims + trained prior.
+NN is 10.6% of game time; env.step/clone is 89.4%. eff_batch=5.5 means the A100 executes
+tiny batches of ~5 tensors, adding kernel-launch overhead (~50–200 µs/call) with negligible
+compute to amortize. Amdahl limit: 1 / (0.894 + 0.106/∞) = **1.12×** — even perfect GPU
+NN compute can't deliver more than 12% total speedup. Actual result is 0.72× (slowdown)
+because kernel overhead exceeds savings.
 
-Same script, `NUM_WORKERS=4 NUM_GAMES=20`. Runs after Smoke B confirms parity.
-
-4 concurrent CUDA contexts; safe on A100 (model ~few MB × 4 + ~300 MB/context overhead).
-
-| Metric | 1 worker | 4 workers |
-|---|---|---|
-| avg_game_time_s | TBD | TBD |
-| wall for 20 games | TBD | TBD |
-| GPU util % | TBD | TBD |
+**Smoke B2 (4-worker GPU) cancelled** — given the 1-worker result, scaling workers
+only adds CUDA context overhead without fixing the env.step bottleneck.
 
 ---
 
-## Decision criteria → v3a_fast pipeline
+## Conclusions and next steps
 
-| Outcome | Action |
+### What we learned
+
+| Question | Answer |
 |---|---|
-| GPU ≥ 3× faster than CPU-fast AND H2D < 20% AND quality OK | Switch pipeline to GPU node + fast backend; keep 10k sims |
-| GPU 1.5–3× faster | Weigh GPU core-hour cost vs CPU; likely still worth it |
-| GPU < 1.5× faster | Stay CPU; spend GPU budget on training not selfplay |
-| H2D > 20% | Try batch=64 or 128; otherwise GPU doesn't help this model size |
-| Quality degrades > 1.5 cost units | Lower virtual_loss to 0.5 or batch to 16 |
+| Does fast_mcts Phase 1 help on CPU? | **Yes — 2.05×** at 10k sims + trained prior. Ship it. |
+| Is the bottleneck still NN at 10k sims? | **No.** NN = 10.6% of time, env.step/clone = 89.4%. |
+| Does GPU selfplay help? | **No — 0.72× (slowdown).** A100 at 1% util. Amdahl limit ~1.12×. |
+| Why is eff_batch only 5.5 with cap=32? | Terminal fraction = 84.7%: most sims skip NN entirely. |
+| What delivers the next 5× speedup? | **Phase 3: vec env / undo-stack** — targets the 89.4%. |
+
+### Pipeline recommendation
+
+Use `backend=fast` on CPU nodes (2× win, zero extra cost). Selfplay time budget:
+v3a01's 3h/cycle → **~1.5h/cycle** with fast backend, or run more games in same budget.
+
+GPU allocation: keep exclusively for training (A100 is well-utilized there). Do not request
+GPU for selfplay nodes until Phase 3 makes NN the bottleneck again.
+
+### v3a_fast_01 pipeline (ready to launch)
+
+Matches v3a01 exactly, adds `backend=fast`. Warm-starts from v3a01 cycle_05.
+Expected per-cycle selfplay wall: ~1.5h (down from 3h). Can extend to 10 cycles
+in the same total compute budget as v3a01's 5 cycles.
+
+```bash
+python pipeline_kickoff.py \
+  --pipeline_root=/scratch/huang651/grid_mcts2/pipelines \
+  --pipeline_id=v3a_fast_01 \
+  --bootstrap_ckpt=/scratch/huang651/grid_mcts2/pipelines/pipeline_v3a01/checkpoints/cycle_05.ckpt \
+  --cycles=5 \
+  --pretrain_epochs=0 --train_epochs=2 \
+  --sliding_window=5 \
+  --num_tasks=20 --games_per_task=1000 \
+  --selfplay_time=02:00:00 --train_time=01:30:00 \
+  --selfplay_cpus=64 --selfplay_mem=32G --train_mem=64G \
+  --preset=hpc \
+  --config_override=map_num=2 \
+  --config_override=random_board=True \
+  --config_override=mcts.num_simulations=10000 \
+  --config_override=env.reward_mode=plan_cost \
+  --config_override=mcts.root_dirichlet_alpha=0.1 \
+  --config_override=training.buffer_size=2500000 \
+  --config_override=mcts.backend=fast
+```
+
+### Longer-term: Phase 3 (vec env)
+
+Phase 3 targets env.step/clone (89.4% of time). Approaches:
+- **Undo-stack**: single env with `reverse_step`, no clone at all
+- **Batched env**: vectorize board state across N sims, step in parallel
+
+Once env is vectorized, NN batching fills to cap=32 (all N sims need NN, not just 15%),
+GPU util jumps from 1% to >40%, and the Amdahl limit rises from 1.12× to ~5–10×.
+See `fast_mcts/docs/phases.md` §Phase 3.
 
 ---
 

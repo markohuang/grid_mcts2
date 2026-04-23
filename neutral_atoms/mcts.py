@@ -408,8 +408,7 @@ def _gumbel_improved_policy(node, config):
     q_min, q_max = q_arr.min(), q_arr.max()
     q_range = q_max - q_min
     q_norm = (q_arr - q_min) / q_range if q_range > 1e-8 else np.zeros_like(q_arr)
-    max_N = max((node.children[a].visit_count for a in actions), default=0)
-    sigma = (config.gumbel.c_visit + max_N) * config.gumbel.c_scale * q_norm
+    sigma = config.gumbel.c_visit * config.gumbel.c_scale * q_norm
     scores = logits + sigma
     scores -= scores.max()
     exps = np.exp(scores)

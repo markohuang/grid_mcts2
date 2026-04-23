@@ -14,7 +14,12 @@ Checks:
 """
 
 import argparse
+import os
 import sys
+
+# Ensure repo root is on path when run as `python fast_mcts/test_gpu_sanity.py`
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 
 _HAS_CUDA = torch.cuda.is_available()

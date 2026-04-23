@@ -161,11 +161,13 @@ def get_config():
     # improved-policy rule (argmax_a [π'(a) - N(a)/(1+ΣN)]). Policy target becomes π' (guaranteed
     # improvement) instead of softmax-of-visits.
     #   num_samples_m=0 => auto-set to num_legal = board_size - num_qubits + 1 in set_derived_config.
-    #   c_visit / c_scale: σ(q_norm) = (c_visit + max_N) * c_scale * q_norm. Paper defaults.
+    #   c_visit / c_scale: σ(q_norm) = c_visit * c_scale * q_norm (fixed scale, sim-count independent).
+    #   Original paper used (c_visit + max_N) but that collapses π' to one-hot at >~500 sims.
+    #   c_visit=5.0 keeps σ on the same scale as FakeNet logits (~2-3); gives policy_entropy~1.8 nats.
     c.mcts.gumbel = ml_collections.ConfigDict()
     c.mcts.gumbel.enabled = False
     c.mcts.gumbel.num_samples_m = 0
-    c.mcts.gumbel.c_visit = 50.0
+    c.mcts.gumbel.c_visit = 5.0
     c.mcts.gumbel.c_scale = 1.0
 
     c.training = ml_collections.ConfigDict()
