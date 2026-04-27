@@ -213,34 +213,39 @@ Formal verdict: **FAIL** — but both failing checks are criteria artifacts, not
 
 ---
 
+## Entropy calibration smoke (2026-04-23)
+
+Job 59791008. σ formula fixed (`c_visit * c_scale * q_norm`, no `max_N`), `c_visit=5.0`. 62 games, 10k sims, random MAPS[2], FakeNet.
+
+| Metric | Phase 2 treatment (old σ) | Entropy smoke (fixed σ) | Gate |
+|---|---:|---:|---|
+| cost median | 13 | **12** | ≤ 14 ✓ **PASS** |
+| cost min | 8 | 9 | — |
+| cost mean | 12.92 | **12.26** | — |
+| policy_entropy median | 0.000 | **1.571** | > 0.5 ✓ **PASS** |
+| reached_terminal_frac | 0.555 | 0.298 | — |
+| mcts_depth mean | 7.93 | 4.879 | — |
+| game_time_s median | 211s | 305s | — |
+
+**Both gates pass.** σ fix is validated; `c_visit=5.0` is the new default.
+
+**cost_median improved from 13 → 12**, matching the known lower bound for MAPS[2]. The old over-exploitative one-hot policy was hurting search by collapsing non-root decisions too aggressively; the softer π' keeps enough diversity to explore better subtrees before committing. Policy entropy at 1.571 is in good shape for training (v3a pUCT was 1.281 — same order of magnitude).
+
+`mcts_depth` and `reached_terminal_frac` dropped back toward pUCT levels (4.87, 0.298 vs 7.93, 0.555 in old formula). With softer π', non-root selection distributes visits more broadly → shallower but wider trees → fewer terminal-reaching PV lines. Wallclock increased from 211s to 305s for the same reason (broader trees = more nodes visited per sim).
+
+**Code landed:** `mcts.py:412` formula changed, `config.py` default `c_visit` updated to 5.0.
+
+---
+
 ## Open issues
 
-### 1. σ formula fix for trained-net runs (BLOCKING Phase 3)
-
-**Problem:** `σ = (c_visit + max_N) × c_scale × q_norm` was designed for low-sim regimes. At 10k sims, `max_N ≈ 2410`, σ scale = 2460, and π' collapses to one-hot.
-
-**Fix:** change `_gumbel_improved_policy` in `mcts.py` to:
-```python
-# before (original paper formula, breaks at high sim counts)
-sigma = (self.config.c_visit + max_n) * self.config.c_scale * q_norm
-
-# after (fixed: only c_visit sets the scale)
-sigma = self.config.c_visit * self.config.c_scale * q_norm
-```
-
-**Calibration needed:** run 1 job × 100 games with this fix + `c_visit=5.0`. Gate:
-- `policy_entropy_median > 0.5` (some training diversity)
-- `cost_median ≤ 14` (action quality preserved)
-
-If both pass, use `c_visit=5.0` for Phase 3+.
-
-### 2. Decision rule revision for Phase 5
+### 1. Decision rule revision for Phase 5
 
 The §3 criteria in `gumbel_pczero_plan.md` were written for pUCT-style behavior. For Phase 5 (8×8):
 - Remove `corr(depth, cost)` as a Gumbel gate; replace with `cost_median` gap vs control (already passing).
 - Make `reached_terminal_frac` check directional: flag only if treatment < control − 5pp.
 
-### 3. Control baseline timing
+### 2. Control baseline timing
 
 Phase 2 control ran at 317s/game vs v3a's 176s (+80%). Same config, different cluster conditions. Not a correctness issue, but 8×8 wave sizing should use Phase 2 control timings as the reference, not v3a.
 
@@ -250,7 +255,7 @@ Phase 2 control ran at 317s/game vs v3a's 176s (+80%). Same config, different cl
 
 | Step | Prerequisite | Description |
 |---|---|---|
-| σ formula calibration smoke | — | Fix `_gumbel_improved_policy`, run 1 job, verify entropy + cost |
-| Phase 3: trained-net control | σ fix landed | First end-to-end training run using Gumbel self-play data |
+| ~~σ formula calibration smoke~~ | ~~—~~ | ~~DONE — both gates passed, c_visit=5.0 validated~~ |
+| Phase 3: trained-net control | σ fix landed ✓ | First end-to-end training run using Gumbel self-play data |
 | Phase 4: B and AB waves | Phase 3 stable | PCZero auxiliary loss; requires trained-net control |
 | Phase 5: 8×8 replication | Phase 4 complete | MAPS[5], promotion gate for `config.py` default |
