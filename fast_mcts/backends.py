@@ -44,5 +44,14 @@ def _register_fast():
     register(FAST_BACKEND, play_game)
 
 
+FAST_GUMBEL_BACKEND = 'fast_gumbel'
+
+
+def _register_fast_gumbel():
+    from .gumbel_search import play_game
+    register(FAST_GUMBEL_BACKEND, play_game)
+
+
 _register_classic()
 _register_fast()
+_register_fast_gumbel()
