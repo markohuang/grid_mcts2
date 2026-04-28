@@ -129,6 +129,7 @@ def run_mcts_batched(mcts_cfg, root, history, network, min_max_stats, env,
     num_sims = mcts_cfg.num_simulations
     assert num_sims > 0
     backend = NNBackend(network, cap=nn_batch_size, cache=cache)
+    env._shared_cost_cache = {}
 
     # per-sim telemetry (mirror classic)
     tot_depth = 0
@@ -231,6 +232,7 @@ def run_mcts_batched(mcts_cfg, root, history, network, min_max_stats, env,
     root._mcts_nn_total_ms = backend.total_nn_ms   # h2d + forward; 0.0 on CPU (not instrumented)
     root._mcts_nn_cache_hits = backend.cache_hits
     root._mcts_nn_nn_calls = backend.nn_calls
+    env._shared_cost_cache = None
 
 
 def play_game(game: Game, mcts_cfg, network,
@@ -253,6 +255,10 @@ def play_game(game: Game, mcts_cfg, network,
     assert getattr(mcts_cfg, 'prior_mix_weight', 0.0) == 0.0, (
         "fast_mcts Phase 1 does not support prior_mix_weight > 0 yet "
         "(use backend='classic')"
+    )
+    gumbel_cfg = getattr(mcts_cfg, 'gumbel', None)
+    assert gumbel_cfg is None or not getattr(gumbel_cfg, 'enabled', False), (
+        "fast_mcts does not support Gumbel (use backend='classic')"
     )
 
     while not game.terminal() and len(game.history) < mcts_cfg.max_moves:

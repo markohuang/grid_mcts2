@@ -24,21 +24,25 @@ and flow through `pipeline_kickoff.py --config_override=...` → `$CONFIG_FLAGS`
 
 ---
 
-## v3a01 cycle_05 deterministic eval (partial, context for baseline)
+## v3a01 cycle_05 deterministic eval (complete for sims ≤ 3200)
 
-Job 59778046 timed out before completing sims=10000 (no `eval_summary.json`).
-Per-sim best-cost on 30 held-out validation maps (seed_base=100000):
+Job 59790830. 30 held-out validation maps, seed_base=100000. Full results in
+`pipelines/pipeline_v3a01/eval/cycle_05b/eval_summary.json`. See also [docs/evaluation/v3a01_cycle05.md](../evaluation/v3a01_cycle05.md).
 
-| sims | best cost |
-|---|---|
-| 200 | **10** |
-| 800 | **10** |
-| 3200 | **10** |
-| 10000 | — (timed out) |
+| method | avg cost | min | p10 | p50 | p90 | avg plan time |
+|---|---|---|---|---|---|---|
+| Kohei greedy (no search) | 15.73 | 13 | 14 | 16 | 18 | 12ms |
+| MCTS sims=200 | 13.63 | 10 | 11 | 13 | 17 | 9.5s |
+| MCTS sims=800 | 12.20 | 10 | 10 | 12 | 14 | 35s |
+| MCTS sims=3200 | **11.53** | **10** | **10** | **11** | **14** | 129s |
 
-**Key implication**: trained prior reaches cost=10 at 200 sims — ~50× sim reduction vs the
-FakeNet bootstrap (avg=22.1 at 10k sims). The sims=10000 eval is deferred to after the fast
-backend is validated (will be much faster with GPU).
+**Key implication for fast_mcts**: 800 sims already beats Kohei by −22% avg cost (12.20 vs 15.73).
+The fast backend's 2.05× speedup means:
+- At sims=800: 35s/map → ~17s/map with fast backend
+- Selfplay at sims=800 (vs current 10k) = 12× faster games at comparable or better inference quality
+- This unlocks ~10 cycles within the same 21h wall clock as v3a01's 5 cycles
+
+sims=10000 eval is deferred (each run at 30 maps × 537s/game ≈ 4.5h; needs either fast backend or reduced map count).
 
 ---
 

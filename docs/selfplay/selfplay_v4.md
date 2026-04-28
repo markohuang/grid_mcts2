@@ -17,7 +17,9 @@ Continuation of `selfplay_v3.md` (5×5 random maps). v4 scales to **8×8 boards 
 
 The search-depth problem compounds: we need MORE sims just to match v3's effective tree depth. And on top of that, episodes are 2.5× longer, so each game takes 2.5× more env-step work per sim budget.
 
-## Open questions we don't have data for yet
+**Status (2026-04-28):** FakeNet data collection complete. Both waves finished. Training pipeline is v4a01 — see [docs/pipelines/v4a01.md](../pipelines/v4a01.md) for live status.
+
+## Open questions answered by the FakeNet waves
 
 - **What cost distribution to expect.** No reference optimum for MAPS[5] (unlike map 2 where Round 04 reported cost=12). First v4 wave defines the baseline.
 - **Whether 10k sims (v3a's setting) produces usable data on 8×8.** At branching ~45, uniform-BFS depth is ~2.4. Might be too shallow for meaningful Q-discrimination.
@@ -43,31 +45,17 @@ The search-depth problem compounds: we need MORE sims just to match v3's effecti
 
 ## Plan
 
-### Step 1: v4_smoke — calibration run
+### Step 1: v4_smoke — calibration run — DONE
 
-1 slurm job, 62 games (1 per worker), 20k sims, plan_cost, 8×8 MAPS[5], `--time=02:00:00`.
+Results: pUCT 1392s/game, Gumbel 835s/game. Gumbel chosen for production (−42% cost vs pUCT).
+Full results in v4a01.md § "Step 1".
 
-Goals:
-- Measure `game_time_s` distribution on 8×8 with current config. Use to size v4a.
-- Confirm lineage / per-game map_id stamping works with 8×8 structure (shouldn't change vs 5×5, but verify).
-- Check early indicators: does cost have reasonable variance? Does `corr(depth, cost)` have an informative sign even with shallow search?
+### Step 2: v4a — FakeNet production wave — DONE
 
-If smoke completes with `game_time_s` median < 600s, v4a at 1000 games/job × 20 jobs × 20k sims with `--time=06:00:00` is feasible (16 games/worker × 600s = 9600s = 2.7h, fits in 6h).
+v4a_gumbel (20k games, Gumbel, 835s/game) and v4a_puct (19k games, pUCT, 1392s/game) completed 2026-04-27.
+Bootstrap data at `/scratch/huang651/grid_mcts2/datasets/v4a_gumbel`. Training pipeline: see v4a01.md.
 
-If `game_time_s` > 600s, reduce v4a to 500 games/job or drop sim count to 15k.
-
-If `game_time_s` > 1800s (30 min), something's pathological and we stop to debug rather than launch a full wave.
-
-### Step 2: v4a — first production wave (pending smoke)
-
-Script will be written after smoke results land. Sketch:
-
-```
-sbatch slurm/selfplay_v4a.sh
-# array=0-19, ~1000 games/job, 20k sims, plan_cost, MAPS[5], random_board, --time=<TBD from smoke>
-```
-
-What we'll measure from v4a data:
+Measured from v4a_gumbel data:
 - **Cost distribution shape.** We want a wide distribution (low rel_spread = narrow = bad, high rel_spread = wide = good). Target: rel_cost_spread > 0.30.
 - **Cost min / median.** No reference optimum, so we track relative improvement across future v4 waves.
 - **Correlations in the same direction as v3a.** `corr(depth, cost) < 0`, `corr(entropy, cost) > 0`, `corr(noop, cost) < 0`, `corr(root_v, cost) ≤ 0`.

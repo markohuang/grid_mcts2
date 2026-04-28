@@ -21,6 +21,7 @@ class NeutralAtomsEnv:
         self.reward_mode = getattr(config, 'reward_mode', 'remaining_cost')
         self.entropy_weight = getattr(config, 'entropy_weight', 0.0)
         self.track_plan_delta = getattr(config, 'track_plan_delta', False)
+        self._shared_cost_cache = None
         self._precompute_relevant_atoms()
         self._precompute_gate_indicators()
         self.reset()
@@ -207,9 +208,19 @@ class NeutralAtomsEnv:
 
     def _compute_remaining_cost(self) -> int:
         """Compute total cost of all remaining layers from current positions."""
+        cache = self._shared_cost_cache
+        key = None
+        if cache is not None:
+            key = (self.atom_positions.numpy().tobytes(), self.tasks_done,
+                   tuple(int(x) for m in self.current_phase_moves for x in m.tolist()))
+            val = cache.get(key)
+            if val is not None:
+                return val
         total = 0
         for layer_idx in range(self.tasks_done, self.num_tasks):
             total += self._compute_layer_cost_fast(layer_idx)
+        if key is not None:
+            cache[key] = total
         return total
 
     def _get_observation(self) -> dict:
@@ -298,10 +309,11 @@ class NeutralAtomsEnv:
             new_env._do_nothing_total = self._do_nothing_total
         new_env._cost_dirty = True
         new_env._cached_cost = None
+        new_env._shared_cost_cache = self._shared_cost_cache  # share dict reference
         return new_env
 
     def state_hash(self) -> int:
-        return hash((self.atom_positions.tobytes(), self.tasks_done, self.current_atom_idx))
+        return hash((self.atom_positions.numpy().tobytes(), self.tasks_done, self.current_atom_idx))
 
     def to_json(self) -> dict:
         return {

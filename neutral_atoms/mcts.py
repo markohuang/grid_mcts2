@@ -97,6 +97,7 @@ def play_game(game: Game, config, network: Network,
 
 
 def run_mcts(config, root, history, network, min_max_stats, env):
+    env._shared_cost_cache = {}
     assert config.num_simulations > 0, "num_simulations must be > 0"
     total_depth = 0
     total_nonzero_reward_sims = 0
@@ -174,6 +175,7 @@ def run_mcts(config, root, history, network, min_max_stats, env):
     root._mcts_boundary_reach_frac = total_boundary_sims / num_sims
     root._mcts_reached_terminal_frac = total_reached_terminal_sims / num_sims
     root._mcts_sign_changes_mean = total_sign_changes / num_sims
+    env._shared_cost_cache = None
 
 
 def _select_action(move_in_episode, node, config, action_space_size,
@@ -191,23 +193,39 @@ def _select_action(move_in_episode, node, config, action_space_size,
 
 
 def _select_child(config, node, min_max_stats):
-    _, action, child = max(
-        (_ucb_score(config, node, child, min_max_stats), action, child)
-        for action, child in node.children.items()
-    )
-    return action, child
+    pb_c_base = config.pb_c_base
+    pb_c_init = config.pb_c_init
+    discount = config.discount
+    mn = min_max_stats.minimum
+    rng = min_max_stats.maximum - mn
+    parent_n = node.visit_count
+    pb_c_factor = (math.log((parent_n + pb_c_base + 1) / pb_c_base) + pb_c_init) * math.sqrt(parent_n)
+    best_score = -float('inf')
+    best_action = -1
+    best_child = None
+    for action, child in node.children.items():
+        cv = child.visit_count
+        score = pb_c_factor * child.prior / (cv + 1)
+        if cv > 0:
+            q = child.reward + discount * child.value_sum / cv
+            score += (q - mn) / rng if rng > 0.0 else q
+        if score > best_score or (score == best_score and action > best_action):
+            best_score = score
+            best_action = action
+            best_child = child
+    return best_action, best_child
 
 
-def _ucb_score(config, parent, child, min_max_stats):
+def _ucb_score(pb_c_base, pb_c_init, discount, parent, child, min_max_stats):
     pb_c = (
-        math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
-        + config.pb_c_init
+        math.log((parent.visit_count + pb_c_base + 1) / pb_c_base)
+        + pb_c_init
     )
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
     prior_score = pb_c * child.prior
     if child.visit_count > 0:
         value_score = min_max_stats.normalize(
-            child.reward + config.discount * child.value()
+            child.reward + discount * child.value()
         )
     else:
         value_score = 0
@@ -272,6 +290,11 @@ def _gumbel_plan(config, root, env, network):
     root.value_sum = root.network_value
     actions = list(root.children.keys())
     assert actions, "_gumbel_plan called with no legal actions"
+    env._shared_cost_cache = {}
+    # Extract config scalars once — avoid ml_collections overhead inside sim loops.
+    c_visit = config.gumbel.c_visit
+    c_scale = config.gumbel.c_scale
+    discount = config.discount
 
     gumbel_noise = {a: float(np.random.gumbel()) for a in actions}
     priors_logit = {a: math.log(max(root.children[a].prior, 1e-10)) for a in actions}
@@ -296,7 +319,8 @@ def _gumbel_plan(config, root, env, network):
         n_per_cand = max(1, total_sims // (num_phases * m_phase))
         for cand in candidates:
             for _ in range(n_per_cand):
-                d, b, t, rs, rsq = _gumbel_simulate(config, root, cand, env, network)
+                d, b, t, rs, rsq = _gumbel_simulate(
+                    config, root, cand, env, network, c_visit, c_scale, discount)
                 total_depth += d
                 boundary_sims += b
                 terminal_sims += t
@@ -305,15 +329,18 @@ def _gumbel_plan(config, root, env, network):
                 sims_run += 1
         if m_phase <= 1:
             break
-        scores = _gumbel_halving_scores(root, candidates, config, gumbel_noise, priors_logit)
+        scores = _gumbel_halving_scores(
+            root, candidates, c_visit, c_scale, discount, gumbel_noise, priors_logit)
         candidates = sorted(candidates, key=lambda a: scores[a], reverse=True)[:max(1, m_phase // 2)]
 
     # Final winner: highest halving score over survivors
-    final_scores = _gumbel_halving_scores(root, candidates, config, gumbel_noise, priors_logit)
+    final_scores = _gumbel_halving_scores(
+        root, candidates, c_visit, c_scale, discount, gumbel_noise, priors_logit)
     winner = max(candidates, key=lambda a: final_scores[a])
 
+    env._shared_cost_cache = None
     # Improved-policy target over ALL root legal actions (not just survivors)
-    root._gumbel_policy = _gumbel_improved_policy(root, config)
+    root._gumbel_policy = _gumbel_improved_policy(root, c_visit, c_scale, discount)
 
     # Populate stats (parity with run_mcts; reward_frac / sign_changes not tracked in gumbel yet)
     n = max(sims_run, 1)
@@ -330,8 +357,13 @@ def _gumbel_plan(config, root, env, network):
     return winner
 
 
-def _gumbel_simulate(config, root, root_action, env, network):
+def _gumbel_simulate(config, root, root_action, env, network,
+                     c_visit=None, c_scale=None, discount=None):
     """One simulation: forced first action at root, then deterministic non-root traversal to leaf."""
+    if c_visit is None:
+        c_visit = config.gumbel.c_visit
+        c_scale = config.gumbel.c_scale
+        discount = config.discount
     sim_env = env.clone()
     search_path = [root]
     depth = 0
@@ -351,7 +383,7 @@ def _gumbel_simulate(config, root, root_action, env, network):
 
     while node.expanded():
         layer_before = sim_env.tasks_done
-        action, node = _gumbel_non_root_select(node, config)
+        action, node = _gumbel_non_root_select(node, config, c_visit, c_scale, discount)
         result = sim_env.step(action, skip_obs=True)
         reward_sum += result.reward
         reward_sq += result.reward ** 2
@@ -375,14 +407,22 @@ def _gumbel_simulate(config, root, root_action, env, network):
         leaf_value = 0.0
         terminal = 1
     _expand_node(node, legal, network_output, result.reward, sim_env=sim_env, config=config)
-    _backpropagate(search_path, leaf_value, config.discount, None)
+    _backpropagate(search_path, leaf_value, discount, None)
     return depth, boundary, terminal, reward_sum, reward_sq
 
 
-def _gumbel_non_root_select(node, config):
-    """Deterministic non-root: argmax_a [π'(a) - N(a)/(1+ΣN)]."""
+def _gumbel_non_root_select(node, config, c_visit=None, c_scale=None, discount=None):
+    """Deterministic non-root: argmax_a [π'(a) - N(a)/(1+ΣN)].
+
+    c_visit, c_scale, discount: pre-extracted scalars from config to avoid
+    repeated ml_collections lookups when called inside a tight sim loop.
+    """
+    if c_visit is None:
+        c_visit = config.gumbel.c_visit
+        c_scale = config.gumbel.c_scale
+        discount = config.discount
     total_N = sum(c.visit_count for c in node.children.values())
-    pi_prime = _gumbel_improved_policy(node, config)
+    pi_prime = _gumbel_improved_policy(node, c_visit, c_scale, discount)
     best_a, best_child, best_score = None, None, -float('inf')
     for a, c in node.children.items():
         s = pi_prime[a] - c.visit_count / (1 + total_N)
@@ -391,24 +431,24 @@ def _gumbel_non_root_select(node, config):
     return best_a, best_child
 
 
-def _gumbel_completed_q(node, config):
+def _gumbel_completed_q(node, discount):
     """completedQ(a) = r(a) + γ·V(child) if visited else node.network_value (parent V fallback)."""
-    return {a: (c.reward + config.discount * c.value()) if c.visit_count > 0 else node.network_value
+    return {a: (c.reward + discount * c.value()) if c.visit_count > 0 else node.network_value
             for a, c in node.children.items()}
 
 
-def _gumbel_improved_policy(node, config):
+def _gumbel_improved_policy(node, c_visit, c_scale, discount):
     """π'(a) ∝ softmax(logit(a) + σ(completedQ(a))) over all children at this node."""
     if not node.children:
         return {}
-    q_vals = _gumbel_completed_q(node, config)
+    q_vals = _gumbel_completed_q(node, discount)
     actions = list(node.children.keys())
     logits = np.array([math.log(max(node.children[a].prior, 1e-10)) for a in actions])
     q_arr = np.array([q_vals[a] for a in actions])
     q_min, q_max = q_arr.min(), q_arr.max()
     q_range = q_max - q_min
     q_norm = (q_arr - q_min) / q_range if q_range > 1e-8 else np.zeros_like(q_arr)
-    sigma = config.gumbel.c_visit * config.gumbel.c_scale * q_norm
+    sigma = c_visit * c_scale * q_norm
     scores = logits + sigma
     scores -= scores.max()
     exps = np.exp(scores)
@@ -416,9 +456,10 @@ def _gumbel_improved_policy(node, config):
     return {a: float(pi_prime[i]) for i, a in enumerate(actions)}
 
 
-def _gumbel_halving_scores(root, candidates, config, gumbel_noise, priors_logit):
+def _gumbel_halving_scores(root, candidates, c_visit, c_scale, discount,
+                           gumbel_noise, priors_logit):
     """Score for sequential halving: g(a) + logit(a) + σ(completedQ(a)). Gumbel noise persists."""
-    q_vals = _gumbel_completed_q(root, config)
+    q_vals = _gumbel_completed_q(root, discount)
     q_subset = np.array([q_vals[a] for a in candidates])
     q_min, q_max = q_subset.min(), q_subset.max()
     q_range = q_max - q_min
@@ -426,7 +467,7 @@ def _gumbel_halving_scores(root, candidates, config, gumbel_noise, priors_logit)
     out = {}
     for a in candidates:
         q_n = (q_vals[a] - q_min) / q_range if q_range > 1e-8 else 0.0
-        sig = (config.gumbel.c_visit + max_N) * config.gumbel.c_scale * q_n
+        sig = (c_visit + max_N) * c_scale * q_n
         out[a] = gumbel_noise[a] + priors_logit[a] + sig
     return out
 

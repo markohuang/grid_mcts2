@@ -113,6 +113,7 @@ def main():
         t0 = time.time()
         loaded = load_dataset_into_buffer(
             dataset_dirs, config.env, config.training.td_steps, trainer.replay_buffer,
+            max_transitions=config.training.buffer_size,
         )
         load_time = time.time() - t0
         print(f"  loaded {loaded} games ({len(trainer.replay_buffer)} transitions) "

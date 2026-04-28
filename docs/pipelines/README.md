@@ -75,9 +75,9 @@ squeue -u huang651 | grep pipe_              # active jobs
 |---|---|---|---|---|
 | [smoke1](smoke1.md) | 2026-04-21 | 4 fake games (map 1) | 1 | Plumbing smoke test; chain works end-to-end |
 | [v2f01](v2f01.md) | 2026-04-21 | wave02f_reverted (20k FakeNet, map 2 fixed) | 1 | Pretrained net hit cost **10** on fixed map 2 (prior best 12). Avg 23→17 (−27%). |
-| [v3a01](v3a01.md) | 2026-04-22 → 04-23 | wave03a_rnd_plancost (19k FakeNet, random 5x5) | 5 | Avg cost 22.1 → **12.99** (−41%). Min cost **8** on random boards. Monotonic improvement across cycles. |
-
-| [v3a_fast](v3a_fast.md) | 2026-04-23 → | v3a01 cycle_05 ckpt | TBD | fast_mcts (batch=32, vl=1.0) on 5×5 random boards; smoke + ablation series |
+| [v3a01](v3a01.md) | 2026-04-22 → 04-23 | wave03a_rnd_plancost (19k FakeNet, random 5×5) | 5 | Avg cost 22.1 → **12.99** (−41%). Inference eval: 800 sims avg=12.20, beats Kohei (15.73). See [eval/v3a01_cycle05.md](../evaluation/v3a01_cycle05.md). |
+| [v3a_fast](v3a_fast.md) | 2026-04-23 | v3a01 cycle_05 ckpt | smoke only | fast_mcts Phase 1: 2.05× CPU speedup. GPU selfplay counterproductive (env is bottleneck). |
+| [v4a01](v4a01.md) | planned | v4a_gumbel FakeNet wave (8×8) | 5 planned | First 8×8 pipeline. Gumbel fixed-σ + fast backend. Bootstrap data TBD. |
 
 ## Failure modes seen in practice
 

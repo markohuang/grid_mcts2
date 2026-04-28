@@ -1,3 +1,5 @@
+import os
+import random
 import torch
 import concurrent.futures
 from lightning import Fabric
@@ -7,6 +9,23 @@ from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage, PrioritizedS
 from .game import Game
 from .mcts import play_game
 from .network import Network
+
+
+class _GameDataset(torch.utils.data.Dataset):
+    """Wraps a list of raw game dicts for parallel DataLoader loading."""
+    def __init__(self, game_dicts, env_config_dict, td_steps):
+        self.game_dicts = game_dicts
+        self.env_config_dict = env_config_dict
+        self.td_steps = td_steps
+
+    def __len__(self):
+        return len(self.game_dicts)
+
+    def __getitem__(self, idx):
+        import ml_collections
+        env_config = ml_collections.ConfigDict(self.env_config_dict)
+        game = Game.from_dict(self.game_dicts[idx], env_config)
+        return game_to_tensordict(game, self.td_steps)
 
 
 def game_to_tensordict(game, td_steps):
@@ -36,7 +55,8 @@ def game_to_tensordict(game, td_steps):
 
 
 def load_dataset_into_buffer(dataset_dirs, env_config, td_steps, buffer,
-                             filter_class=None, filter_map_id=None):
+                             filter_class=None, filter_map_id=None,
+                             max_transitions=None, num_workers=None):
     from .data import scan_dataset, load_game_batches
     if isinstance(dataset_dirs, str):
         dataset_dirs = [dataset_dirs]
@@ -45,10 +65,24 @@ def load_dataset_into_buffer(dataset_dirs, env_config, td_steps, buffer,
         batch_files.extend(scan_dataset(d, filter_class=filter_class,
                                         filter_map_id=filter_map_id))
     game_dicts = load_game_batches(batch_files)
+
+    # Shuffle so multi-cycle sliding window is sampled representatively.
+    random.shuffle(game_dicts)
+
+    # Cap to buffer capacity — games beyond this get evicted immediately anyway.
+    if max_transitions is not None and game_dicts:
+        steps_per_game = len(game_dicts[0].get('history', range(1)))
+        max_games = max(1, int(max_transitions / max(1, steps_per_game)))
+        game_dicts = game_dicts[:max_games]
+
+    n_workers = num_workers if num_workers is not None else min(32, os.cpu_count() or 1)
+    dataset = _GameDataset(game_dicts, env_config.to_dict(), td_steps)
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=1, num_workers=n_workers,
+        collate_fn=lambda batch: batch[0],
+    )
     loaded = 0
-    for gd in game_dicts:
-        game = Game.from_dict(gd, env_config)
-        td = game_to_tensordict(game, td_steps)
+    for td in loader:
         buffer.extend(td)
         loaded += 1
     return loaded
