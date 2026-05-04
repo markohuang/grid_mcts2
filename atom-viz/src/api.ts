@@ -1,6 +1,6 @@
 // API client for Python backend
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
 
 export interface Position {
   row: number;
@@ -133,9 +133,13 @@ export async function generatePlan(params: {
   board: SimulationData['board'];
   circuit: number[][][];
   method: 'kouhei' | 'smt' | 'mcts';
+  model_id?: string;
   checkpoint_path?: string;
   num_simulations?: number;
   smt_timeout_ms?: number;
+  backend?: string;
+  device?: string;
+  deterministic?: boolean;
 }): Promise<GeneratePlanResponse> {
   const response = await fetch(`${API_BASE}/generate_plan`, {
     method: 'POST',

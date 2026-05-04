@@ -19,6 +19,7 @@ Requires neutral_atoms package in parent directory:
 
 import sys
 from pathlib import Path
+import os
 
 # Add parent directory to path for neutral_atoms + baselines imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import torch
+import httpx
 
 # Import from neutral_atoms package
 from neutral_atoms.moves import parallel_groups, count_groups, canonicalize_moves, optimal_count_groups
@@ -39,10 +41,24 @@ from baselines.smt_policy import plan as smt_plan
 
 app = FastAPI(title="Neutral Atoms Viz API")
 
-# Allow CORS for local development
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://debug.lnz-study.com",
+]
+
+
+def _cors_origins() -> list[str]:
+    configured = os.environ.get("ATOM_VIZ_CORS_ORIGINS", "")
+    if not configured:
+        return DEFAULT_CORS_ORIGINS
+    return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+
+
+# Allow the local Vite frontend and configured public debug frontend.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -108,9 +124,13 @@ class GeneratePlanRequest(BaseModel):
     board: dict
     circuit: list
     method: str  # "kouhei" | "smt" | "mcts"
+    model_id: Optional[str] = None
     checkpoint_path: Optional[str] = None
     num_simulations: Optional[int] = 50
     smt_timeout_ms: Optional[int] = 30_000
+    backend: Optional[str] = None
+    device: Optional[str] = None
+    deterministic: Optional[bool] = True
 
 class GeneratePlanResponse(BaseModel):
     board: dict
@@ -119,6 +139,19 @@ class GeneratePlanResponse(BaseModel):
     method: str
     elapsed_ms: float
     plan_cost: Optional[int] = None  # optimal cost (chromatic number) — matches display
+
+
+def _inference_url() -> str:
+    return os.environ.get("MCTS_INFERENCE_URL", "").rstrip("/")
+
+
+def _inference_timeout() -> float:
+    return float(os.environ.get("MCTS_REQUEST_TIMEOUT_S", "120"))
+
+
+def _inference_headers() -> dict[str, str]:
+    token = os.environ.get("MCTS_INFERENCE_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 # ============================================================================
 # Helper Functions
@@ -415,8 +448,62 @@ def generate_plan(request: GeneratePlanRequest) -> dict:
         )
 
     elif request.method == "mcts":
-        raise HTTPException(status_code=501,
-                            detail="MCTS inference not yet available — train a model first.")
+        inference_url = _inference_url()
+        if not inference_url:
+            raise HTTPException(
+                status_code=503,
+                detail="MCTS inference service is not configured. Try Kouhei/SMT or start the inference service.",
+            )
+
+        payload = {
+            "board": board,
+            "circuit": circuit,
+            "model_id": request.model_id or os.environ.get("MCTS_DEFAULT_MODEL", "v3a01-cycle05"),
+            "checkpoint_path": request.checkpoint_path,
+            "num_simulations": request.num_simulations or int(os.environ.get("MCTS_DEFAULT_NUM_SIMULATIONS", "400")),
+            "backend": request.backend or os.environ.get("MCTS_DEFAULT_BACKEND", "fast"),
+            "device": request.device or os.environ.get("MCTS_DEFAULT_DEVICE", "auto"),
+            "deterministic": True if request.deterministic is None else request.deterministic,
+        }
+        try:
+            with httpx.Client(timeout=_inference_timeout()) as client:
+                resp = client.post(
+                    f"{inference_url}/v1/plan",
+                    json=payload,
+                    headers=_inference_headers(),
+                )
+        except httpx.TimeoutException as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="MCTS inference timed out. Reduce simulations or try later.",
+            ) from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="MCTS inference service is offline. Start the inference worker or choose Kouhei/SMT.",
+            ) from exc
+
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail=resp.json().get("detail", "MCTS model not found."))
+        if resp.status_code in (413, 422):
+            raise HTTPException(status_code=resp.status_code, detail=resp.json().get("detail", "Invalid MCTS request."))
+        if resp.status_code == 503:
+            raise HTTPException(status_code=503, detail=resp.json().get("detail", "MCTS inference service unavailable."))
+        if resp.status_code == 504:
+            raise HTTPException(status_code=504, detail=resp.json().get("detail", "MCTS inference timed out."))
+        if resp.status_code >= 400:
+            detail = resp.json().get("detail", "MCTS inference service failed.") if resp.headers.get("content-type", "").startswith("application/json") else "MCTS inference service failed."
+            raise HTTPException(status_code=502, detail=detail)
+
+        result = resp.json()
+        return GeneratePlanResponse(
+            board=result["board"],
+            circuit=result["circuit"],
+            plan=result["plan"],
+            method="mcts",
+            elapsed_ms=result.get("elapsed_ms", (time.time() - t0) * 1000),
+            plan_cost=result.get("plan_cost"),
+        )
 
     else:
         raise HTTPException(status_code=400,

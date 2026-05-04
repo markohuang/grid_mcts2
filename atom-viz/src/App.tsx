@@ -1,11 +1,164 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Grid } from './Grid';
-import { Position, Move, AtomPositions, SimulationData, Circuit } from './types';
-import { computeAllLayers, checkApiHealth, ComputeAllResponse, randomBoard, generatePlan, GeneratePlanResponse } from './api';
+import { Position, Move, AtomPositions, SimulationData, Gate } from './types';
+import { computeAllLayers, checkApiHealth, ComputeAllResponse, randomBoard, generatePlan } from './api';
 import { PlaybackTab } from './animation';
 
 const STORAGE_KEY = 'atom-viz-state';
 const BASELINE_COST_KEY = 'atom-viz-baseline';
+
+type PlanMethod = 'kouhei' | 'smt' | 'mcts';
+type CandidateStatus = 'generating' | 'ready' | 'error';
+
+interface PlanCandidate {
+  id: string;
+  label: string;
+  method: PlanMethod;
+  data: SimulationData | null;
+  computed: ComputeAllResponse | null;
+  status: CandidateStatus;
+  error?: string;
+  elapsed_ms?: number;
+  plan_cost?: number;
+  created_at: number;
+  params?: {
+    model_id?: string;
+    num_simulations?: number;
+    backend?: string;
+    device?: string;
+  };
+}
+
+const methodLabel = (method: PlanMethod) => (
+  method === 'kouhei' ? 'Greedy' : method === 'mcts' ? 'Model' : 'SMT'
+);
+
+const normalizeGeneratedPlan = (result: {
+  board: SimulationData['board'];
+  circuit: number[][][];
+  plan: Array<Array<{ atom: number; from?: Position; to: Position }>>;
+}): SimulationData => ({
+  board: result.board,
+  circuit: result.circuit.map(layer => layer.map(gate => [gate[0], gate[1]] as Gate)),
+  plan: result.circuit.map((_, layerIdx) =>
+    (result.plan[layerIdx] || []).map(move => ({
+      atom: move.atom,
+      from: move.from ?? move.to,
+      to: move.to,
+    }))
+  ),
+});
+
+const puzzleSignature = (value: SimulationData | null) => {
+  if (!value) return '';
+  return JSON.stringify({ board: value.board, circuit: value.circuit });
+};
+
+const atomPositionsBeforeTask = (value: SimulationData, taskIdx: number): AtomPositions => {
+  const result: AtomPositions = {};
+  Object.entries(value.board.initialAtoms).forEach(([id, pos]) => {
+    result[parseInt(id)] = { row: pos.row, col: pos.col };
+  });
+  for (let i = 0; i < taskIdx && i < value.plan.length; i++) {
+    (value.plan[i] || []).forEach(move => {
+      result[move.atom] = { row: move.to.row, col: move.to.col };
+    });
+  }
+  return result;
+};
+
+interface LayerPlanViewProps {
+  title: string;
+  subtitle?: string;
+  data: SimulationData | null;
+  computed: ComputeAllResponse | null;
+  layerIndex: number;
+  compact?: boolean;
+}
+
+const LayerPlanView: React.FC<LayerPlanViewProps> = ({ title, subtitle, data, computed, layerIndex, compact = false }) => {
+  if (!data || !computed) {
+    return (
+      <div style={{ padding: '18px', background: '#12171f', border: '1px solid #2a3444', borderRadius: '8px', color: '#6b7280' }}>
+        {title} is not ready.
+      </div>
+    );
+  }
+
+  const layer = computed.layers[layerIndex];
+  if (!layer) {
+    return (
+      <div style={{ padding: '18px', background: '#12171f', border: '1px solid #2a3444', borderRadius: '8px', color: '#ff6b6b' }}>
+        {title} has no layer {layerIndex + 1}.
+      </div>
+    );
+  }
+
+  const gates = data.circuit[layerIndex] || [];
+  const before = atomPositionsBeforeTask(data, layerIndex);
+  const after = { ...before };
+  (data.plan[layerIndex] || []).forEach(move => {
+    after[move.atom] = { row: move.to.row, col: move.to.col };
+  });
+  const activeAtoms = new Set<number>();
+  gates.forEach(([a, b]) => {
+    activeAtoms.add(a);
+    activeAtoms.add(b);
+  });
+  const layerCost = (layer.reconfigCost ?? 0) + (layer.gateCost ?? 0);
+
+  return (
+    <section style={{ display: 'grid', gap: compact ? '6px' : '12px', background: '#12171f', border: '1px solid #2a3444', borderRadius: '8px', padding: compact ? '8px 10px' : '14px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: compact ? '13px' : '15px', fontWeight: 700, color: '#e8e8e8' }}>{title}</div>
+          {subtitle && <div style={{ marginTop: compact ? '1px' : '3px', fontSize: compact ? '11px' : '12px', color: '#6b7280' }}>{subtitle}</div>}
+        </div>
+        <div style={{ display: 'flex', gap: '10px', fontSize: compact ? '11px' : '12px', color: '#9ca3af' }}>
+          <span>Total {computed.totalCost}</span>
+          <span>Layer {layerCost}</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: compact ? '10px' : '18px', alignItems: 'flex-start', justifyContent: 'center', flexWrap: 'wrap' }}>
+        <div style={{ background: '#161c24', padding: compact ? '6px' : '14px', borderRadius: '8px', border: '1px solid #4ecdc455' }}>
+          <Grid
+            rows={data.board.rows}
+            cols={data.board.cols}
+            atoms={before}
+            moves={layer.reconfigMoves || []}
+            moveGroups={layer.reconfigGroups || []}
+            gates={[]}
+            gateGroups={[]}
+            activeAtoms={activeAtoms}
+            isEditable={false}
+            label="Reconfiguration"
+            cost={layer.reconfigCost ?? 0}
+            showGateArrows={false}
+            compact={compact}
+          />
+        </div>
+        <div style={{ background: '#161c24', padding: compact ? '6px' : '14px', borderRadius: '8px', border: '1px solid #6c5ce755' }}>
+          <Grid
+            rows={data.board.rows}
+            cols={data.board.cols}
+            atoms={after}
+            moves={[]}
+            moveGroups={[]}
+            gates={(layer.canonicalizedGates || layer.gates || gates) as Gate[]}
+            gateGroups={layer.gateGroups || []}
+            activeAtoms={activeAtoms}
+            isEditable={false}
+            label="Gate Execution"
+            cost={layer.gateCost ?? 0}
+            showGateArrows={true}
+            compact={compact}
+          />
+        </div>
+      </div>
+    </section>
+  );
+};
 
 const App: React.FC = () => {
   const [data, setData] = useState<SimulationData | null>(null);
@@ -17,15 +170,20 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [editingGates, setEditingGates] = useState(false);
   const [gatesInput, setGatesInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'edit' | 'playback'>('edit');
+  const [activeTab, setActiveTab] = useState<'edit' | 'compare' | 'playback'>('edit');
   const [baselineCost, setBaselineCost] = useState<number | null>(null);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [generateParams, setGenerateParams] = useState({ rows: 3, cols: 10, qubits: 9, tasks: 5, gatesPerLayer: 3 });
   const [showPlanModal, setShowPlanModal] = useState(false);
-  const [planMethod, setPlanMethod] = useState<'kouhei' | 'smt' | 'mcts'>('kouhei');
+  const [planMethod, setPlanMethod] = useState<PlanMethod>('kouhei');
+  const [mctsModelId, setMctsModelId] = useState('v3a01-cycle05');
+  const [mctsNumSimulations, setMctsNumSimulations] = useState(400);
   const [planGenerating, setPlanGenerating] = useState(false);
-  const [planResult, setPlanResult] = useState<GeneratePlanResponse | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<PlanCandidate[]>([]);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
+  const [compareLayerIndex, setCompareLayerIndex] = useState(0);
+  const [lastPuzzleSignature, setLastPuzzleSignature] = useState('');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -71,6 +229,21 @@ const App: React.FC = () => {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     }
   }, [data]);
+
+  useEffect(() => {
+    const nextSignature = puzzleSignature(data);
+    if (!nextSignature) return;
+    if (!lastPuzzleSignature) {
+      setLastPuzzleSignature(nextSignature);
+      return;
+    }
+    if (lastPuzzleSignature !== nextSignature) {
+      setCandidates([]);
+      setSelectedCandidateIds([]);
+      setCompareLayerIndex(0);
+      setLastPuzzleSignature(nextSignature);
+    }
+  }, [data, lastPuzzleSignature]);
 
   // Compute baseline cost
   useEffect(() => {
@@ -119,7 +292,10 @@ const App: React.FC = () => {
     if (data && currentTaskIndex >= data.circuit.length) {
       setCurrentTaskIndex(Math.max(-1, data.circuit.length - 1));
     }
-  }, [data, currentTaskIndex]);
+    if (data && compareLayerIndex >= data.circuit.length) {
+      setCompareLayerIndex(Math.max(0, data.circuit.length - 1));
+    }
+  }, [data, currentTaskIndex, compareLayerIndex]);
 
   // Reset handler — clears all reconfig moves, keeps board and circuit
   const handleReset = useCallback(() => {
@@ -415,35 +591,99 @@ const App: React.FC = () => {
   // Generate plan via backend
   const handleGeneratePlan = async () => {
     if (!data) return;
+    const candidateId = `${planMethod}-${Date.now()}`;
+    const params = planMethod === 'mcts'
+      ? { model_id: mctsModelId, num_simulations: mctsNumSimulations, backend: 'fast', device: 'auto' }
+      : undefined;
+    const label = planMethod === 'mcts'
+      ? `${methodLabel(planMethod)} ${mctsModelId}`
+      : methodLabel(planMethod);
+
     setPlanGenerating(true);
-    setPlanResult(null);
     setPlanError(null);
+    setCandidates(prev => [
+      {
+        id: candidateId,
+        label,
+        method: planMethod,
+        data: null,
+        computed: null,
+        status: 'generating',
+        created_at: Date.now(),
+        params,
+      },
+      ...prev,
+    ]);
+
     try {
-      const result = await generatePlan({ board: data.board, circuit: data.circuit, method: planMethod });
-      setPlanResult(result);
+      const result = await generatePlan({
+        board: data.board,
+        circuit: data.circuit,
+        method: planMethod,
+        ...(planMethod === 'mcts' ? {
+          model_id: mctsModelId,
+          num_simulations: mctsNumSimulations,
+          backend: 'fast',
+          device: 'auto',
+          deterministic: true,
+        } : {}),
+      });
+      const candidateData = normalizeGeneratedPlan(result);
+      const candidateComputed = await computeAllLayers(candidateData);
+      setCandidates(prev => prev.map(candidate =>
+        candidate.id === candidateId
+          ? {
+              ...candidate,
+              data: candidateData,
+              computed: candidateComputed,
+              status: 'ready',
+              elapsed_ms: result.elapsed_ms,
+              plan_cost: result.plan_cost ?? candidateComputed.totalCost,
+            }
+          : candidate
+      ));
+      setSelectedCandidateIds(prev => (
+        prev.length < 2 && !prev.includes(candidateId) ? [...prev, candidateId] : prev
+      ));
+      setActiveTab('compare');
+      setShowPlanModal(false);
     } catch (e: any) {
-      setPlanError(e.message);
+      const message = e.message || 'Plan generation failed';
+      setPlanError(message);
+      setCandidates(prev => prev.map(candidate =>
+        candidate.id === candidateId
+          ? { ...candidate, status: 'error', error: message }
+          : candidate
+      ));
+      setActiveTab('compare');
+      setShowPlanModal(false);
     } finally {
       setPlanGenerating(false);
     }
   };
 
-  // Apply generated plan to current data
-  const handleApplyPlan = () => {
-    if (!planResult) return;
-    const newData = {
-      board: planResult.board,
-      circuit: planResult.circuit as unknown as Circuit,
-      plan: planResult.plan.map(layer => layer.map(m => ({ ...m, from: m.from! }))) as Move[][],
-    } as SimulationData;
+  const handleToggleCandidate = (candidate: PlanCandidate) => {
+    if (candidate.status !== 'ready') return;
+    setSelectedCandidateIds(prev => {
+      if (prev.includes(candidate.id)) return prev.filter(id => id !== candidate.id);
+      if (prev.length >= 2) return prev;
+      return [...prev, candidate.id];
+    });
+  };
+
+  const handleRemoveCandidate = (candidateId: string) => {
+    setCandidates(prev => prev.filter(candidate => candidate.id !== candidateId));
+    setSelectedCandidateIds(prev => prev.filter(id => id !== candidateId));
+  };
+
+  const handleApplyCandidate = (candidate: PlanCandidate) => {
+    if (!candidate.data) return;
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(BASELINE_COST_KEY);
     setBaselineCost(null);
-    setData(newData);
+    setData(candidate.data);
     setCurrentTaskIndex(-1);
     setSelectedAtom(null);
-    setShowPlanModal(false);
-    setPlanResult(null);
   };
 
   // Import/Export
@@ -491,7 +731,7 @@ const App: React.FC = () => {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (editingGates || activeTab === 'playback') return;
+      if (editingGates || activeTab !== 'edit') return;
 
       if (e.key === 'ArrowLeft') {
         setCurrentTaskIndex(i => Math.max(-1, i - 1));
@@ -529,6 +769,10 @@ const App: React.FC = () => {
   const costDiff = currentCost !== undefined && baselineCost !== null ? currentCost - baselineCost : null;
   const costColor = costDiff === null || costDiff === 0 ? '#e8e8e8' : costDiff < 0 ? '#00b894' : '#ff6b6b';
   const costBg = costDiff === null || costDiff === 0 ? '#1e2530' : costDiff < 0 ? '#00b89422' : '#ff6b6b22';
+  const selectedCandidates = selectedCandidateIds
+    .map(id => candidates.find(candidate => candidate.id === id))
+    .filter((candidate): candidate is PlanCandidate => Boolean(candidate));
+  const readyCandidateCount = candidates.filter(candidate => candidate.status === 'ready').length;
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#0a0e14', color: '#e8e8e8' }}>
@@ -541,10 +785,10 @@ const App: React.FC = () => {
           
           {/* Tabs */}
           <div style={{ display: 'flex', gap: '4px', background: '#1e2530', borderRadius: '8px', padding: '4px' }}>
-            {['edit', 'playback'].map(tab => (
+            {(['edit', 'compare', 'playback'] as const).map(tab => (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab as 'edit' | 'playback')}
+                onClick={() => setActiveTab(tab)}
                 style={{
                   padding: '8px 20px',
                   fontSize: '14px',
@@ -557,7 +801,7 @@ const App: React.FC = () => {
                   textTransform: 'capitalize',
                 }}
               >
-                {tab}
+                {tab === 'compare' ? `Compare${readyCandidateCount ? ` (${readyCandidateCount})` : ''}` : tab}
               </button>
             ))}
           </div>
@@ -589,7 +833,7 @@ const App: React.FC = () => {
             Random 5×5
           </button>
 
-          <button onClick={() => { setShowPlanModal(true); setPlanResult(null); setPlanError(null); }} disabled={apiStatus !== 'connected' || !data} style={{ padding: '8px 12px', fontSize: '13px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: (apiStatus === 'connected' && data) ? 'pointer' : 'not-allowed', opacity: (apiStatus === 'connected' && data) ? 1 : 0.5 }}>
+          <button onClick={() => { setShowPlanModal(true); setPlanError(null); }} disabled={apiStatus !== 'connected' || !data} style={{ padding: '8px 12px', fontSize: '13px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: (apiStatus === 'connected' && data) ? 'pointer' : 'not-allowed', opacity: (apiStatus === 'connected' && data) ? 1 : 0.5 }}>
             Generate Plan
           </button>
 
@@ -851,6 +1095,134 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
+        ) : activeTab === 'compare' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 340px) 1fr', gap: '18px', alignItems: 'start' }}>
+            <aside style={{ display: 'grid', gap: '12px', background: '#12171f', border: '1px solid #2a3444', borderRadius: '8px', padding: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                <div>
+                  <div style={{ fontSize: '14px', fontWeight: 700, color: '#e8e8e8' }}>Plan Candidates</div>
+                  <div style={{ marginTop: '3px', fontSize: '12px', color: '#6b7280' }}>Select up to two ready results.</div>
+                </div>
+                <button
+                  onClick={() => { setShowPlanModal(true); setPlanError(null); }}
+                  disabled={apiStatus !== 'connected'}
+                  style={{ padding: '7px 10px', fontSize: '12px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: apiStatus === 'connected' ? 'pointer' : 'not-allowed', opacity: apiStatus === 'connected' ? 1 : 0.5 }}
+                >
+                  Generate
+                </button>
+              </div>
+
+              {candidates.length === 0 ? (
+                <div style={{ padding: '16px', background: '#0a0e14', border: '1px dashed #2a3444', borderRadius: '8px', color: '#6b7280', fontSize: '13px' }}>
+                  Generate a greedy or model result to compare plans.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: '8px' }}>
+                  {candidates.map(candidate => {
+                    const selected = selectedCandidateIds.includes(candidate.id);
+                    const disabled = candidate.status !== 'ready' || (!selected && selectedCandidateIds.length >= 2);
+                    const statusColor = candidate.status === 'ready' ? '#00b894' : candidate.status === 'error' ? '#ff6b6b' : '#ffd93d';
+                    return (
+                      <div key={candidate.id} style={{ display: 'grid', gap: '8px', padding: '10px', background: selected ? '#163331' : '#0a0e14', border: `1px solid ${selected ? '#4ecdc4' : '#2a3444'}`, borderRadius: '8px' }}>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'start' }}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            disabled={disabled}
+                            onChange={() => handleToggleCandidate(candidate)}
+                            style={{ marginTop: '3px' }}
+                          />
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 700, color: '#e8e8e8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{candidate.label}</span>
+                              <span style={{ fontSize: '11px', color: statusColor, textTransform: 'uppercase' }}>{candidate.status}</span>
+                            </div>
+                            <div style={{ marginTop: '4px', fontSize: '12px', color: '#6b7280' }}>
+                              {candidate.status === 'ready' && `Cost ${candidate.plan_cost ?? candidate.computed?.totalCost ?? '?'} · ${candidate.elapsed_ms?.toFixed(0) ?? '?'} ms`}
+                              {candidate.status === 'generating' && 'Waiting for backend result...'}
+                              {candidate.status === 'error' && candidate.error}
+                            </div>
+                            {candidate.params && (
+                              <div style={{ marginTop: '3px', fontSize: '11px', color: '#6b7280' }}>
+                                {candidate.params.num_simulations} sims · {candidate.params.backend} · {candidate.params.device}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            onClick={() => handleApplyCandidate(candidate)}
+                            disabled={!candidate.data}
+                            style={{ flex: 1, padding: '6px 8px', fontSize: '12px', background: candidate.data ? '#2a3444' : '#1e2530', color: candidate.data ? '#e8e8e8' : '#4a5568', border: 'none', borderRadius: '6px', cursor: candidate.data ? 'pointer' : 'not-allowed' }}
+                          >
+                            Apply
+                          </button>
+                          <button
+                            onClick={() => handleRemoveCandidate(candidate.id)}
+                            style={{ padding: '6px 8px', fontSize: '12px', background: '#2a1a1a', color: '#ff7675', border: 'none', borderRadius: '6px', cursor: 'pointer' }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </aside>
+
+            <section style={{ display: 'grid', gap: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'center', background: '#12171f', border: '1px solid #2a3444', borderRadius: '8px', padding: '8px 12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '13px', color: '#6b7280' }}>Layer</span>
+                  <button
+                    onClick={() => setCompareLayerIndex(i => Math.max(0, i - 1))}
+                    disabled={compareLayerIndex === 0}
+                    style={{ padding: '6px 10px', background: compareLayerIndex === 0 ? '#1e2530' : '#2a3444', color: compareLayerIndex === 0 ? '#4a5568' : '#e8e8e8', border: 'none', borderRadius: '6px', cursor: compareLayerIndex === 0 ? 'not-allowed' : 'pointer' }}
+                  >
+                    Prev
+                  </button>
+                  <span style={{ minWidth: '88px', textAlign: 'center', fontSize: '14px', fontWeight: 700 }}>
+                    {compareLayerIndex + 1} / {data.circuit.length}
+                  </span>
+                  <button
+                    onClick={() => setCompareLayerIndex(i => Math.min(data.circuit.length - 1, i + 1))}
+                    disabled={compareLayerIndex >= data.circuit.length - 1}
+                    style={{ padding: '6px 10px', background: compareLayerIndex >= data.circuit.length - 1 ? '#1e2530' : '#2a3444', color: compareLayerIndex >= data.circuit.length - 1 ? '#4a5568' : '#e8e8e8', border: 'none', borderRadius: '6px', cursor: compareLayerIndex >= data.circuit.length - 1 ? 'not-allowed' : 'pointer' }}
+                  >
+                    Next
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  {selectedCandidates.map(candidate => (
+                    <span key={candidate.id} style={{ padding: '5px 9px', borderRadius: '999px', background: '#1e2530', color: '#9ca3af', fontSize: '12px' }}>
+                      {candidate.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {selectedCandidates.length === 0 ? (
+                <div style={{ minHeight: '360px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#12171f', border: '1px dashed #2a3444', borderRadius: '8px', color: '#6b7280' }}>
+                  Select one or two ready candidates to inspect their plans.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateRows: selectedCandidates.length === 2 ? '1fr 1fr' : '1fr', gap: selectedCandidates.length === 2 ? '8px' : '14px' }}>
+                  {selectedCandidates.map(candidate => (
+                    <LayerPlanView
+                      key={candidate.id}
+                      title={candidate.label}
+                      subtitle={`${methodLabel(candidate.method)} · ${candidate.plan_cost ?? candidate.computed?.totalCost ?? '?'} total moves`}
+                      data={candidate.data}
+                      computed={candidate.computed}
+                      layerIndex={compareLayerIndex}
+                      compact={selectedCandidates.length === 2}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
         ) : (
           <PlaybackTab data={data} computed={computed} />
         )}
@@ -878,35 +1250,44 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {planMethod === 'mcts' && (
+              <div style={{ display: 'grid', gap: '12px', marginBottom: '16px' }}>
+                <label style={{ color: '#6b7280', fontSize: '13px', display: 'grid', gap: '6px' }}>
+                  Model ID
+                  <input
+                    type="text"
+                    value={mctsModelId}
+                    onChange={e => setMctsModelId(e.target.value)}
+                    style={{ background: '#0a0e14', border: '1px solid #2a3444', borderRadius: '4px', padding: '8px', color: '#e8e8e8', fontSize: '14px' }}
+                  />
+                </label>
+                <label style={{ color: '#6b7280', fontSize: '13px', display: 'grid', gap: '6px' }}>
+                  Simulations
+                  <input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={mctsNumSimulations}
+                    onChange={e => setMctsNumSimulations(Math.max(1, parseInt(e.target.value) || 1))}
+                    style={{ background: '#0a0e14', border: '1px solid #2a3444', borderRadius: '4px', padding: '8px', color: '#e8e8e8', fontSize: '14px' }}
+                  />
+                </label>
+              </div>
+            )}
+
             {planError && (
               <div style={{ background: '#2a1a1a', border: '1px solid #e17055', borderRadius: '6px', padding: '10px', marginBottom: '12px', color: '#ff7675', fontSize: '13px' }}>
                 {planError}
               </div>
             )}
 
-            {planResult && !planError && (
-              <div style={{ background: '#1a2a1a', border: '1px solid #4ecdc4', borderRadius: '6px', padding: '10px', marginBottom: '12px', fontSize: '13px', color: '#4ecdc4' }}>
-                <div>Method: <strong>{planResult.method.toUpperCase()}</strong></div>
-                <div>Elapsed: <strong>{planResult.elapsed_ms.toFixed(0)} ms</strong></div>
-                {planResult.plan_cost !== undefined && (
-                  <div>Cost: <strong>{planResult.plan_cost}</strong></div>
-                )}
-              </div>
-            )}
-
             <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
               <button onClick={() => setShowPlanModal(false)} style={{ flex: 1, padding: '10px', background: '#2a3444', color: '#e8e8e8', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
-                {planResult ? 'Close' : 'Cancel'}
+                Cancel
               </button>
-              {planResult ? (
-                <button onClick={handleApplyPlan} style={{ flex: 1, padding: '10px', background: '#4ecdc4', color: '#0a0e14', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '600' }}>
-                  Apply Plan
-                </button>
-              ) : (
-                <button onClick={handleGeneratePlan} disabled={planGenerating} style={{ flex: 1, padding: '10px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: planGenerating ? 'not-allowed' : 'pointer', fontWeight: '600', opacity: planGenerating ? 0.7 : 1 }}>
-                  {planGenerating ? 'Generating…' : 'Generate'}
-                </button>
-              )}
+              <button onClick={handleGeneratePlan} disabled={planGenerating} style={{ flex: 1, padding: '10px', background: '#e17055', color: '#fff', border: 'none', borderRadius: '6px', cursor: planGenerating ? 'not-allowed' : 'pointer', fontWeight: '600', opacity: planGenerating ? 0.7 : 1 }}>
+                {planGenerating ? 'Generating…' : 'Generate Candidate'}
+              </button>
             </div>
           </div>
         </div>
