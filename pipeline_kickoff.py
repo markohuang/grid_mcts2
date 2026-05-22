@@ -66,6 +66,8 @@ def _write_pipeline_params(pipeline_dir, args, pipeline_id, final_cycle, config_
         'TRAIN_TIME': args.train_time,
         'SELFPLAY_MEM': args.selfplay_mem,
         'SELFPLAY_CPUS': str(args.selfplay_cpus),
+        'SELFPLAY_NUM_WORKERS': str(args.selfplay_num_workers),
+        'SELFPLAY_GRES': args.selfplay_gres,
         'TRAIN_MEM': args.train_mem,
         'SLURM_ACCOUNT': args.slurm_account,
         'PRESET': args.preset,
@@ -162,6 +164,10 @@ def main():
     p.add_argument('--slurm_account', default='rrg-aspuru')
     p.add_argument('--selfplay_time', default='06:00:00')
     p.add_argument('--selfplay_cpus', type=int, default=64)
+    p.add_argument('--selfplay_num_workers', type=int, default=0,
+                   help='Parallel MCTS workers per task. 0 = selfplay_cpus-2 (legacy).')
+    p.add_argument('--selfplay_gres', default='',
+                   help='SLURM --gres for selfplay tasks, e.g. "gpu:1". Empty = CPU only.')
     p.add_argument('--selfplay_mem', default='32G')
     p.add_argument('--train_time', default='01:00:00')
     p.add_argument('--train_mem', default='32G')
@@ -170,6 +176,8 @@ def main():
 
     if not args.bootstrap_data and args.cycles < 1:
         sys.exit('Need at least --bootstrap_data or --cycles>=1 for any work.')
+    if args.selfplay_num_workers == 0:
+        args.selfplay_num_workers = args.selfplay_cpus - 2
 
     pipeline_id = args.pipeline_id or _new_pipeline_id()
     pipeline_dir = os.path.abspath(os.path.join(args.pipeline_root, f'pipeline_{pipeline_id}'))

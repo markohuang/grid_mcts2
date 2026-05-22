@@ -23,6 +23,10 @@ NODE_ID="c${CYCLE_PADDED}_task${SLURM_ARRAY_TASK_ID}"
 cd "$REPO_ROOT"
 module load StdEnv/2023
 module load python/3.11 scipy-stack
+# Load CUDA runtime when the task has a GPU allocation (SELFPLAY_GRES contains "gpu").
+if [[ "${SELFPLAY_GRES:-}" == *gpu* ]]; then
+    module load cuda cudnn
+fi
 
 echo "=== pipeline_selfplay ==="
 echo "  PIPELINE_ID=$PIPELINE_ID  CYCLE=$CYCLE  TASK=$SLURM_ARRAY_TASK_ID  NODE_ID=$NODE_ID"
@@ -43,8 +47,8 @@ $VENV_PY selfplay_worker.py \
     --preset="$PRESET" \
     --dataset_dir="$DATASET_DIR" \
     --num_games="$GAMES_PER_TASK" \
-    --num_workers="$((SELFPLAY_CPUS - 2))" \
-    --batch_size="$((SELFPLAY_CPUS - 2))" \
+    --num_workers="${SELFPLAY_NUM_WORKERS:-$((SELFPLAY_CPUS - 2))}" \
+    --batch_size="${SELFPLAY_NUM_WORKERS:-$((SELFPLAY_CPUS - 2))}" \
     --weights_path="$WEIGHTS_PATH" \
     --node_id="$NODE_ID" \
     --slurm_job_id="$SLURM_JOB_ID" \

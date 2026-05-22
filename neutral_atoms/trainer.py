@@ -11,6 +11,10 @@ from .mcts import play_game
 from .network import Network
 
 
+def _identity_collate(batch):
+    return batch[0]
+
+
 class _GameDataset(torch.utils.data.Dataset):
     """Wraps a list of raw game dicts for parallel DataLoader loading."""
     def __init__(self, game_dicts, env_config_dict, td_steps):
@@ -75,11 +79,14 @@ def load_dataset_into_buffer(dataset_dirs, env_config, td_steps, buffer,
         max_games = max(1, int(max_transitions / max(1, steps_per_game)))
         game_dicts = game_dicts[:max_games]
 
-    n_workers = num_workers if num_workers is not None else min(32, os.cpu_count() or 1)
+    # sched_getaffinity respects SLURM cgroup limits; os.cpu_count() returns the
+    # node's full count and would over-spawn workers on cpus-per-task allocations.
+    avail = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    n_workers = num_workers if num_workers is not None else min(32, avail)
     dataset = _GameDataset(game_dicts, env_config.to_dict(), td_steps)
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=1, num_workers=n_workers,
-        collate_fn=lambda batch: batch[0],
+        collate_fn=_identity_collate,
     )
     loaded = 0
     for td in loader:

@@ -12,9 +12,12 @@
 # CYCLE < FINAL_CYCLE, using the A2 submit-next pattern.
 #SBATCH --job-name=pipeline_train
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=16
 #SBATCH --time=01:00:00
 #SBATCH --output=slurm/logs/pipeline_train_%j.out
+# cpus-per-task was 4: DataLoader auto-scales to min(32, os.cpu_count()), capping
+# at 4 starved the loader on 1.2M-transition cycles. 16 gives us 16 parallel
+# DataLoader workers (game_to_tensordict per worker = pure CPU work, scales well).
 set -euo pipefail
 
 : "${PIPELINE_DIR:?PIPELINE_DIR must be set}"
@@ -94,6 +97,8 @@ if [ "$CYCLE" -lt "$FINAL_CYCLE" ]; then
     echo ""
     echo "=== Submitting cycle_${NEXT_PADDED} (selfplay + train) ==="
 
+    SELFPLAY_GRES_ARG=()
+    [ -n "${SELFPLAY_GRES:-}" ] && SELFPLAY_GRES_ARG=(--gres="$SELFPLAY_GRES")
     SELFPLAY_JOB_ID=$( \
         PIPELINE_DIR="$PIPELINE_DIR" CYCLE="$NEXT" \
         sbatch --parsable \
@@ -102,6 +107,7 @@ if [ "$CYCLE" -lt "$FINAL_CYCLE" ]; then
           --time="$SELFPLAY_TIME" \
           --cpus-per-task="$SELFPLAY_CPUS" \
           --mem="$SELFPLAY_MEM" \
+          "${SELFPLAY_GRES_ARG[@]}" \
           --job-name="pipe_sp_${PIPELINE_ID}_c${NEXT_PADDED}" \
           --output="slurm/logs/pipe_sp_${PIPELINE_ID}_c${NEXT_PADDED}_%A_%a.out" \
           "$REPO_ROOT/slurm/pipeline_selfplay.sh" \

@@ -208,6 +208,8 @@ def run_gumbel_batched(mcts_cfg, root: Node, env, network, *,
     root._mcts_nn_requests = backend.total_requests
     root._mcts_nn_batches = backend.total_batches
     root._mcts_nn_max_batch = backend.max_batch_seen
+    root._mcts_nn_h2d_ms = backend.total_h2d_ms    # 0.0 on CPU
+    root._mcts_nn_total_ms = backend.total_nn_ms   # h2d + forward; 0.0 on CPU
 
     return winner
 
