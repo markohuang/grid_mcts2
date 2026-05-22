@@ -31,6 +31,7 @@
 ## Reference
 
 - [alphadev_comparison.md](alphadev_comparison.md) — AlphaDev architecture comparison
+- [inference_service_gateway.md](inference_service_gateway.md) — Deployment design for routing atom-viz MCTS plan generation through an optional GPU inference service
 - [iterative_refinement_reference.md](iterative_refinement_reference.md) — Iterative refinement approaches
 - [map_pool.json](map_pool.json) — 5×5 map pool with best known costs
 - [narval_hpc_migration.md](narval_hpc_migration.md) — HPC deployment (Narval cluster)

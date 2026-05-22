@@ -18,6 +18,7 @@ interface GridProps {
   label?: string;
   cost?: number;
   showGateArrows?: boolean;
+  compact?: boolean;
 }
 
 // Color palette for parallel groups
@@ -65,9 +66,15 @@ export const Grid: React.FC<GridProps> = ({
   label,
   cost,
   showGateArrows = true,
+  compact = false,
 }) => {
-  const cellSize = 56;
-  const padding = 30;
+  const cellSize = compact ? 38 : 56;
+  const padding = compact ? 14 : 30;
+  const atomRadius = compact ? 11 : 16;
+  const selectionRadius = compact ? 15 : 22;
+  const arrowOffsetStart = compact ? 13 : 18;
+  const arrowOffsetEnd = compact ? 14 : 20;
+  const labelFontSize = compact ? 9 : 11;
   const svgWidth = cols * cellSize + padding * 2;
   const svgHeight = rows * cellSize + padding * 2;
 
@@ -126,10 +133,10 @@ export const Grid: React.FC<GridProps> = ({
   const movedAtomIds = new Set(moves.map(m => m.atom));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: compact ? '4px' : '8px' }}>
       {label && (
         <div style={{
-          fontSize: '11px',
+          fontSize: compact ? '10px' : '11px',
           fontWeight: '600',
           color: COLORS.textMuted,
           textTransform: 'uppercase',
@@ -211,7 +218,7 @@ export const Grid: React.FC<GridProps> = ({
               width={cellSize - 8}
               height={cellSize - 8}
               fill={COLORS.trap}
-              rx="4"
+              rx={compact ? '3' : '4'}
               style={{ cursor: isEditable ? 'pointer' : 'default' }}
               onClick={() => isEditable && onCellClick?.({ row, col })}
             />
@@ -228,8 +235,6 @@ export const Grid: React.FC<GridProps> = ({
           const len = Math.sqrt(dx * dx + dy * dy);
           if (len === 0) return null;
           
-          const offsetStart = 18;
-          const offsetEnd = 20;
           const group = moveGroups[i];
           const color = group !== undefined ? getGroupColor(group) : '#ffd93d';
           const markerId = group !== undefined ? `arrowhead-group-${group}` : 'arrowhead-default';
@@ -237,12 +242,12 @@ export const Grid: React.FC<GridProps> = ({
           return (
             <line
               key={`move-${i}`}
-              x1={start.x + (dx / len) * offsetStart}
-              y1={start.y + (dy / len) * offsetStart}
-              x2={end.x - (dx / len) * offsetEnd}
-              y2={end.y - (dy / len) * offsetEnd}
+              x1={start.x + (dx / len) * arrowOffsetStart}
+              y1={start.y + (dy / len) * arrowOffsetStart}
+              x2={end.x - (dx / len) * arrowOffsetEnd}
+              y2={end.y - (dy / len) * arrowOffsetEnd}
               stroke={color}
-              strokeWidth="2.5"
+              strokeWidth={compact ? '2' : '2.5'}
               markerEnd={`url(#${markerId})`}
               style={{
                 cursor: isEditable ? 'pointer' : 'default',
@@ -270,20 +275,18 @@ export const Grid: React.FC<GridProps> = ({
           const len = Math.sqrt(dx * dx + dy * dy);
           if (len === 0) return null;
 
-          const offsetStart = 18;
-          const offsetEnd = 20;
           const group = gateGroups[i];
           const color = group !== undefined ? getGroupColor(group) : '#6c5ce7';
 
           return (
             <line
               key={`gate-${i}`}
-              x1={start.x + (dx / len) * offsetStart}
-              y1={start.y + (dy / len) * offsetStart}
-              x2={end.x - (dx / len) * offsetEnd}
-              y2={end.y - (dy / len) * offsetEnd}
+              x1={start.x + (dx / len) * arrowOffsetStart}
+              y1={start.y + (dy / len) * arrowOffsetStart}
+              x2={end.x - (dx / len) * arrowOffsetEnd}
+              y2={end.y - (dy / len) * arrowOffsetEnd}
               stroke={color}
-              strokeWidth="2.5"
+              strokeWidth={compact ? '2' : '2.5'}
               strokeDasharray="5,3"
               markerEnd={group !== undefined ? `url(#arrowhead-group-${group})` : undefined}
               style={{ filter: `drop-shadow(0 0 3px ${color}50)` }}
@@ -310,7 +313,7 @@ export const Grid: React.FC<GridProps> = ({
               <circle
                 cx={destCenter.x}
                 cy={destCenter.y}
-                r="16"
+                r={atomRadius}
                 fill={`${color}33`}  // 20% opacity fill
                 stroke={color}
                 strokeWidth="2"
@@ -322,7 +325,7 @@ export const Grid: React.FC<GridProps> = ({
                 y={destCenter.y + 1}
                 textAnchor="middle"
                 dominantBaseline="middle"
-                fontSize="11"
+                fontSize={labelFontSize}
                 fontWeight="bold"
                 fill={color}
                 opacity="0.7"
@@ -361,7 +364,7 @@ export const Grid: React.FC<GridProps> = ({
                 <circle
                   cx={center.x}
                   cy={center.y}
-                  r="22"
+                  r={selectionRadius}
                   fill="none"
                   stroke={COLORS.atomSelected}
                   strokeWidth="2"
@@ -372,7 +375,7 @@ export const Grid: React.FC<GridProps> = ({
               <circle
                 cx={center.x}
                 cy={center.y}
-                r="16"
+                r={atomRadius}
                 fill={color}
                 style={{ 
                   filter: isActive ? `drop-shadow(0 0 6px ${color}80)` : 'none',
@@ -385,7 +388,7 @@ export const Grid: React.FC<GridProps> = ({
                 y={center.y + 1}
                 textAnchor="middle"
                 dominantBaseline="middle"
-                fontSize="11"
+                fontSize={labelFontSize}
                 fontWeight="bold"
                 fill={isActive ? COLORS.atomText : COLORS.atomTextInactive}
               >
@@ -398,7 +401,7 @@ export const Grid: React.FC<GridProps> = ({
 
       {cost !== undefined && (
         <div style={{
-          fontSize: '13px',
+          fontSize: compact ? '11px' : '13px',
           color: '#4ecdc4',
           fontWeight: '600',
         }}>
