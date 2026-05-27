@@ -65,6 +65,20 @@ The auxiliary loss during training continuously generates (random_board, cost) p
 
 4. **Policy collapse may still occur.** If the first epoch's visit counts still favor execute (because of higher one-step reward), the policy collapses regardless of value accuracy. May need policy pretraining too.
 
+## Post-hoc analysis: why pretraining failed
+
+Three factors explain why pretraining and auxiliary loss hurt rather than helped:
+
+1. **Only 3 distinct cost values on Map 1.** Random boards produce costs of 12 (19%), 18 (56%), or 24 (26%). The "pretraining" is a 3-class classifier, not continuous cost prediction. No rich signal for the value head.
+
+2. **Overfitting.** 117k params on 512 samples → memorization. Boards with identical cost=18 get predictions ranging from 17.9 to 23.9. MCTS gets noisy, wrong evaluations for visited positions.
+
+3. **Redundant heads.** Pretraining forces correctness = +cost and latency = -cost, making c ≈ -l always. The two heads collapse to one degree of freedom. In natural learning (Exp 1), they learn DIFFERENT patterns from self-play data, providing richer combined signal.
+
+**The value range fix IS the real pretraining fix** — it lets both heads naturally learn from on-distribution self-play data, which turns out to be more effective than forcing off-distribution random-board targets.
+
+To make pretraining work in future: use many more samples (10k+), include intermediate game states (not just initial), and train on-policy (positions from actual self-play).
+
 ## Experiments
 
 ### Shared parameters
@@ -123,9 +137,26 @@ The auxiliary loss during training continuously generates (random_board, cost) p
 
 4. **Why the range matters:** With [-10,10], correctness targets (~18) clamp to 10 and latency targets (~-18) clamp to -10. Both heads see a constant target → no gradient signal → value heads are useless → MCTS degrades to random exploration → policy collapses to first strong pattern (execute). With [-25,25], the latency head learns to distinguish cost=14 from cost=18, providing genuine quality signal to MCTS.
 
+## Results — Phase B (scale-up)
+
+| # | Experiment | Run ID | best | avg (final) | gate_frac | epochs | notes |
+|---|-----------|--------|------|-------------|-----------|--------|-------|
+| 5 | Exp 1 + 50 sims, 40 games, 8 parallel | afdfeb26 | **13** | 22.1 | 9→45% | 19 | New Map 1 record |
+| 6 | 100 sims, gate_only, cw=2 lw=0.5 | 5b989832 | **13** | 22.0 | 4→36% | 20 | Same best, similar avg |
+
+### Key findings (Phase B)
+
+1. **Scale-up reaches cost=13** — a new Map 1 record, matching Map 0's best. The optimal single-move reconfig (q6 → (3,0) or q0 → (1,0)) reduces cost from 18 to 13 in one step. MCTS with 50+ sims finds this reliably by epoch 4-5.
+
+2. **avg_cost plateaus at ~22, not improving.** Despite MCTS finding cost=13 solutions, the policy doesn't learn to reproduce them. Gate_frac stabilizes at 35-45% (the policy explores moves) but avg_cost stays high. The training signal from rare good games is diluted by many mediocre ones.
+
+3. **gate_only reward doesn't help.** Exp 6 with gate_only reward and cw=2/lw=0.5 achieves the same best_cost=13 and similar avg_cost. The reward mode matters less than the value range and simulation budget.
+
+4. **The cost=13 solution structure:** One key move (relocating a single qubit) reduces all-layer gate parallelism cost by 5 (18→13). Different runs find different qubits to move, but the cost reduction is always the same. This suggests there are multiple equivalent optimal single-move reconfigurations on Map 1.
+
 ### Next steps
 
-- **Scale up Exp 1 config** (more sims, more games, more epochs) — the learning curve hasn't plateaued
+- **Understand why avg_cost doesn't converge to best_cost** — is it the policy target, the training data distribution, or the MCTS visit counts?
 - **Test on Map 0 and Map 2** — verify the fix generalizes
 - **Random baseline** — run FakeNet with many games to confirm the network adds value
-- **Investigate cost=14 solutions** — understand what reconfiguration was discovered
+- **Policy imitation from best solutions** — train on the cost=13 trajectories as expert data
