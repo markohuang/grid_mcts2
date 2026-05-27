@@ -37,7 +37,7 @@ const GROUP_COLORS = [
 
 const getGroupColor = (groupIndex: number) => GROUP_COLORS[groupIndex % GROUP_COLORS.length];
 
-const COLORS = {
+const DARK_COLORS = {
   gridBg: '#12171f',
   gridLine: '#1e2530',
   trap: '#2a3444',
@@ -48,6 +48,23 @@ const COLORS = {
   textMuted: '#6b7280',
   cardBorder: '#2a3444',
 };
+
+const LIGHT_COLORS = {
+  gridBg: '#ffffff',
+  gridLine: '#e0e0e0',
+  trap: '#f0f0f0',
+  atomInactive: '#b0b8c4',
+  atomText: '#1a1a1a',
+  atomTextInactive: '#666666',
+  atomSelected: '#1a1a1a',
+  textMuted: '#666666',
+  cardBorder: '#d0d0d0',
+};
+
+const isLightTheme = typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('theme') === 'light';
+
+const COLORS = isLightTheme ? LIGHT_COLORS : DARK_COLORS;
 
 export const Grid: React.FC<GridProps> = ({
   rows,
